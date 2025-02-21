@@ -1,0 +1,33 @@
+[project]
+name = "caddy-cloudflare-cli"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Tadeas Fort", email = "business@tadeasfort.com" }
+]
+dependencies = [
+    "click>=8.1.8",
+    "cloudflare>=2.8.15",
+    "pyyaml>=6.0.1",
+    "python-dotenv>=1.0.0",
+    "rich>=13.9.4",
+    "requests>=2.31.0"
+]
+readme = "README.md"
+requires-python = ">= 3.8"
+license = { text = "GPL-3.0" }
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.rye]
+managed = true
+dev-dependencies = [
+    "pytest>=8.3.4",
+    "ruff>=0.9.7",
+    "ruff-lsp>=0.0.62",
+]
+
+[project.scripts]
+caddy-cloudflare = "caddy_cloudflare_cli.cli:main"

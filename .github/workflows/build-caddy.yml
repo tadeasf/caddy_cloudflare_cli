@@ -1,0 +1,70 @@
+name: Build Caddy with Cloudflare DNS
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install xcaddy
+        run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+      - name: Set binary name
+        run: echo "BINARY_NAME=caddy-cloudflare-${{ matrix.os }}-${{ matrix.arch }}" >> $GITHUB_ENV
+
+      - name: Build Caddy for ${{ matrix.os }}-${{ matrix.arch }}
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          xcaddy build \
+            --with github.com/caddy-dns/cloudflare \
+            --output ${{ env.BINARY_NAME }}
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.BINARY_NAME }}
+          path: ${{ env.BINARY_NAME }}
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: caddy-cloudflare-*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
