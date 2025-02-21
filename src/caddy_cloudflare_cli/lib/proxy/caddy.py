@@ -113,7 +113,7 @@ class CaddyProxy(ReverseProxy):
         X-XSS-Protection "1; mode=block"
         # Referrer policy
         Referrer-Policy "strict-origin-when-cross-origin"
-    }}
+}}
 """
 
             # Add any additional configuration
@@ -122,8 +122,8 @@ class CaddyProxy(ReverseProxy):
                     caddy_config += f"    {key} {value}\n"
                     
             caddy_config += "}\n"
-            
-            # Write configuration to file
+        
+        # Write configuration to file
             config_path = self.dirs['config'] / 'Caddyfile'
             config_path.write_text(caddy_config)
             logger.info(f"Generated Caddy configuration at {config_path}")
