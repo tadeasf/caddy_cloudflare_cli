@@ -55,7 +55,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.21'
+          go-version: '1.22.3'
 
       - name: Install xcaddy
         run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -71,7 +71,8 @@ jobs:
         run: |
           xcaddy build \
             --with github.com/caddy-dns/cloudflare \
-            --output ${{ env.BINARY_NAME }}
+            --output ${{ env.BINARY_NAME }} \
+            --with github.com/caddyserver/caddy/v2@v2.9.1
           chmod +x ${{ env.BINARY_NAME }}
 
       - name: Upload binary as artifact
