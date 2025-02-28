@@ -2,86 +2,19 @@
 Utility functions for Caddy Cloudflare CLI
 """
 import os
-import re
-import random
-import string
-import socket
 import platform
 import logging
 from pathlib import Path
 from typing import Optional, Tuple
 from functools import lru_cache
-import requests  # Add requests for HTTP requests
+
+# Import utility functions from cmd modules
+from .cmd.port import is_port_in_use
 
 logger = logging.getLogger(__name__)
 
-def validate_subdomain(subdomain: str) -> bool:
-    """
-    Validate subdomain format
-    
-    Args:
-        subdomain: Subdomain to validate
-        
-    Returns:
-        True if valid
-    """
-    # Empty subdomains are not valid (use generate_random_subdomain instead)
-    if not subdomain:
-        return False
-        
-    # Reject '@' which is used for root domains in Cloudflare
-    if subdomain == '@':
-        return False
-        
-    # Validate subdomain format:
-    # - Must start and end with a letter or number
-    # - Can contain letters, numbers, and hyphens
-    # - Must be between 1 and 63 characters
-    pattern = r'^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
-    return bool(re.match(pattern, subdomain))
-
-def validate_port(port: int) -> bool:
-    """
-    Validate port number
-    
-    Args:
-        port: Port number to validate
-        
-    Returns:
-        True if valid
-    """
-    return isinstance(port, int) and 1 <= port <= 65535
-
-def generate_random_subdomain(length: int = 8) -> str:
-    """
-    Generate a random subdomain
-    
-    Args:
-        length: Length of subdomain
-        
-    Returns:
-        Random subdomain string
-    """
-    chars = string.ascii_lowercase + string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
-
-def is_port_available(port: int, host: str = 'localhost') -> bool:
-    """
-    Check if port is available
-    
-    Args:
-        port: Port to check
-        host: Host to check
-        
-    Returns:
-        True if port is available
-    """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, port))
-        return True
-    except OSError:
-        return False
+# Alias for backward compatibility
+is_port_available = lambda port, host='localhost': not is_port_in_use(port)
 
 def find_available_port(start_port: int = 8000, end_port: int = 9000) -> Optional[int]:
     """
@@ -94,10 +27,9 @@ def find_available_port(start_port: int = 8000, end_port: int = 9000) -> Optiona
     Returns:
         Available port or None if none found
     """
-    for port in range(start_port, end_port + 1):
-        if is_port_available(port):
-            return port
-    return None
+    from .cmd.port import suggest_available_port
+    port = suggest_available_port(start_port)
+    return port if port <= end_port else None
 
 @lru_cache(maxsize=1)
 def get_system_info() -> Tuple[str, str]:
@@ -142,6 +74,7 @@ def download_file(url: str, target: Path, show_progress: bool = True) -> bool:
         True if successful
     """
     try:
+        import requests
         from rich.progress import Progress, DownloadColumn, TransferSpeedColumn
         from requests.exceptions import RequestException
 

@@ -1,5 +1,5 @@
 """
-Caddy reverse proxy implementation
+Caddy reverse proxy implementation with Caddyfile incremental updates
 """
 import os
 import signal
@@ -7,28 +7,44 @@ import subprocess
 import time
 from pathlib import Path
 import logging
+from typing import Dict, List, Optional, Union, Any
 
-from ..config import Config
-from .base import ReverseProxy, ProxyConfig, ProxyStatus, ProxyError
+from ...config import Config
+from ..base import ReverseProxy, ProxyConfig, ProxyStatus, ProxyError
+from .caddyfile import CaddyfileParser
 
+# Create a logger for this module
 logger = logging.getLogger(__name__)
 
 class CaddyProxy(ReverseProxy):
-    """Caddy reverse proxy implementation"""
+    """Caddy reverse proxy implementation with improved Caddyfile handling"""
     
     def __init__(self, config: Config):
         """Initialize Caddy proxy"""
         self.config = config
         self.binary_path = config.get_binary_path()
+        self.logger = logger
         
         # Ensure directories exist
         self.dirs = config.get_proxy_dirs()
         for dir_path in self.dirs.values():
             dir_path.mkdir(parents=True, exist_ok=True)
             
+        # Set data directory
+        self.data_dir = self.dirs.get('data', Path('~/.caddy-cloudflare/data').expanduser())
+        
+        # Set email for certificates
+        self.email = config.email if hasattr(config, 'email') else None
+        
+        # Set Caddyfile path
+        self.caddyfile_path = self.dirs['config'] / 'Caddyfile'
+        
         self._process = None
         self._pid = None
         self._pid_file = self.dirs['data'] / 'caddy.pid'
+        
+        # Initialize Caddyfile parser
+        self.caddyfile = CaddyfileParser(str(self.caddyfile_path))
         
         # Try to restore existing process
         self._restore_process()
@@ -55,120 +71,149 @@ class CaddyProxy(ReverseProxy):
             self._pid = self._process.pid
             self._pid_file.write_text(str(self._process.pid))
     
-    def generate_config(self, config: ProxyConfig) -> str:
-        """Generate Caddy configuration"""
+    def _get_cloudflare_auth_config(self) -> Dict[str, str]:
+        """Determine Cloudflare authentication configuration"""
+        # Check available authentication methods
+        has_valid_token = bool(self.config.cloudflare_token and self.config.cloudflare_token.strip())
+        has_valid_api_key = bool(self.config.cloudflare_api_key and self.config.cloudflare_api_email and 
+                                self.config.cloudflare_api_key.strip() and self.config.cloudflare_api_email.strip())
+        has_valid_dual_tokens = bool(self.config.cloudflare_zone_token and self.config.cloudflare_dns_token and
+                                self.config.cloudflare_zone_token.strip() and self.config.cloudflare_dns_token.strip())
+        
+        # Set up auth configs for both ACME DNS and TLS directive
+        acme_dns_auth = ""
+        cloudflare_auth = ""
+        
+        if has_valid_dual_tokens:
+            logger.info("Using separate Zone and DNS tokens for Caddy (least privilege)")
+            # This is for the global acme_dns directive
+            acme_dns_auth = "{env.CLOUDFLARE_DNS_TOKEN}"
+            
+            # This is for the tls directive in site blocks
+            # Use clean format without extra indentation or newlines
+            cloudflare_auth = "zone_token {env.CLOUDFLARE_ZONE_TOKEN} api_token {env.CLOUDFLARE_DNS_TOKEN}"
+        elif has_valid_token:
+            logger.info("Using API Token authentication for Caddy")
+            acme_dns_auth = "{env.CLOUDFLARE_API_TOKEN}"
+            cloudflare_auth = "{env.CLOUDFLARE_API_TOKEN}"
+        elif has_valid_api_key:
+            logger.info("Using Global API Key authentication for Caddy")
+            acme_dns_auth = "api_key {env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}"
+            cloudflare_auth = "api_key {env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}"
+        else:
+            logger.warning("No valid Cloudflare authentication method configured")
+        
+        return {
+            "acme_dns_auth": acme_dns_auth,
+            "cloudflare_auth": cloudflare_auth
+        }
+    
+    def generate_config(self, config):
+        """
+        Generate a Caddy configuration for the specified domain and target.
+
+        Args:
+            config (ProxyConfig): The configuration to use, containing domain, target, etc.
+
+        Returns:
+            str: The path to the Caddyfile.
+        """
         try:
-            # Determine which Cloudflare auth method to use
-            has_valid_token = bool(self.config.cloudflare_token and self.config.cloudflare_token.strip())
-            has_valid_api_key = bool(self.config.cloudflare_api_key and self.config.cloudflare_api_email and 
-                                    self.config.cloudflare_api_key.strip() and self.config.cloudflare_api_email.strip())
-            has_valid_dual_tokens = bool(self.config.cloudflare_zone_token and self.config.cloudflare_dns_token and
-                                    self.config.cloudflare_zone_token.strip() and self.config.cloudflare_dns_token.strip())
+            # Ensure the Caddyfile directory exists
+            self.caddyfile_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Extract the domain and target from the config
+            domain = config.domain
+            target = config.target
+
+            # Get Cloudflare authentication config
+            cloudflare_auth_config = self._get_cloudflare_auth_config()
+            cloudflare_auth = cloudflare_auth_config["cloudflare_auth"]
+            acme_dns_auth = cloudflare_auth_config["acme_dns_auth"]
+
+            # Debug logging
+            self.logger.debug(f"Data dir type: {type(self.data_dir)}, value: {self.data_dir}")
             
-            # Determine which Cloudflare auth method to use for acme_dns
-            acme_dns_auth = ""
-            if has_valid_dual_tokens:
-                # Use separate Zone and DNS tokens (preferred for least privilege)
-                logger.info("Using separate Zone and DNS tokens for Caddy (least privilege)")
-                cloudflare_auth = "{\n            zone_token {env.CLOUDFLARE_ZONE_TOKEN}\n            api_token {env.CLOUDFLARE_DNS_TOKEN}\n        }"
-                acme_dns_auth = "{env.CLOUDFLARE_DNS_TOKEN}"
-            elif has_valid_token:
-                # Token-based authentication (API token only)
-                logger.info("Using API Token authentication for Caddy")
-                cloudflare_auth = "{env.CLOUDFLARE_API_TOKEN}"
-                acme_dns_auth = "{env.CLOUDFLARE_API_TOKEN}"
-            elif has_valid_api_key:
-                # Global API Key authentication
-                logger.info("Using Global API Key authentication for Caddy")
-                cloudflare_auth = "{\n            api_key {env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}\n        }"
-                acme_dns_auth = "{\n        api_key {env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}\n    }"
+            # Load and parse the Caddyfile
+            parser = CaddyfileParser()
+            
+            # Create or load Caddyfile
+            if self.caddyfile_path.exists():
+                self.logger.info(f"Loading existing Caddyfile: {self.caddyfile_path}")
+                try:
+                    parser.load(self.caddyfile_path)
+                except Exception as e:
+                    self.logger.error(f"Failed to load existing Caddyfile, creating new one: {e}")
+                    # Initialize with global options if loading fails
+                    try:
+                        # Pass self.data_dir directly as a Path object
+                        self.logger.debug(f"Passing data_dir as Path object: {self.data_dir}")
+                        parser.initialize_with_global_options(
+                            self.email, self.data_dir, acme_dns_auth
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Error in initialize_with_global_options: {e}")
+                        import traceback
+                        self.logger.error(f"Traceback: {traceback.format_exc()}")
+                        raise
             else:
-                raise ProxyError("No valid Cloudflare authentication method configured")
-            
-            # Basic Caddyfile configuration with enhanced Cloudflare settings
-            caddy_config = f"""{{
-    # Global options
-    admin off  # Disable admin API for security
-    auto_https disable_redirects  # Let Cloudflare handle HTTPS redirects
-    
-    # Email for ACME certificates
-    email {self.config.email}
-    
-    # ACME DNS configuration for Cloudflare
-    acme_dns cloudflare {acme_dns_auth}
-    
-    # Storage configuration
-    storage file_system {{
-        root {self.dirs['data']}
-    }}
-}}
+                self.logger.info(f"Initializing new Caddyfile with global options")
+                try:
+                    # Pass self.data_dir directly as a Path object
+                    self.logger.debug(f"Passing data_dir as Path object: {self.data_dir}")
+                    parser.initialize_with_global_options(
+                        self.email, self.data_dir, acme_dns_auth
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error in initialize_with_global_options: {e}")
+                    import traceback
+                    self.logger.error(f"Traceback: {traceback.format_exc()}")
+                    raise
 
-{config.domain} {{
-    reverse_proxy {config.target} {{
-        # Health checks
-        health_uri /health
-        health_interval 30s
-        health_timeout 10s
-        
-        # Extended timeouts for better reliability
-        transport http {{
-            read_timeout 300s
-            write_timeout 300s
-            dial_timeout 30s
-        }}
-        
-        # Headers
-        header_up Host {config.domain}
-        header_up X-Real-IP {{remote_host}}
-        header_up X-Forwarded-For {{remote_host}}
-        header_up X-Forwarded-Proto {{scheme}}
-    }}
-    
-    tls {{
-        dns cloudflare {cloudflare_auth}
-        resolvers 1.1.1.1  # Use Cloudflare DNS resolver
-    }}
-    
-    # Logging
-    log {{
-        output file {self.dirs['data']}/access.log {{
-            roll_size 10MB
-            roll_keep 10
-        }}
-        format json
-    }}
-    
-    # Security headers
-    header {{
-        # Enable HSTS
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        # Prevent clickjacking
-        X-Frame-Options "SAMEORIGIN"
-        # XSS protection
-        X-Content-Type-Options "nosniff"
-        X-XSS-Protection "1; mode=block"
-        # Referrer policy
-        Referrer-Policy "strict-origin-when-cross-origin"
-        # Remove server header
-        -Server
-    }}"""
-
-            # Add any additional configuration
-            if config.additional_config:
-                for key, value in config.additional_config.items():
-                    caddy_config += f"\n    {key} {value}"
-                    
-            caddy_config += "\n}\n"
-        
-            # Write configuration to file
-            config_path = self.dirs['config'] / 'Caddyfile'
-            config_path.write_text(caddy_config)
-            logger.info(f"Generated Caddy configuration at {config_path}")
-                
-            return str(config_path)
+            # Load the site template
+            try:
+                template_content = parser._load_template("Caddyfile_update")
+            except Exception as e:
+                self.logger.error(f"Error loading template: {e}")
+                import traceback
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
+                raise
             
+            # Create log directory if it doesn't exist
+            try:
+                # Use Path object methods instead of os.path.join with string conversion
+                log_dir = self.data_dir / "logs"
+                self.logger.debug(f"Log directory: {log_dir}")
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_path = log_dir / f"{domain}.log"
+                self.logger.debug(f"Log path: {log_path}")
+            except Exception as e:
+                self.logger.error(f"Error creating log directory: {e}")
+                import traceback
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
+                raise
+
+            # Create or update site block for the domain
+            self.logger.info(f"Generating site block for domain: {domain}")
+            additional_config = getattr(config, 'additional_config', "")
+            parser.create_or_update_site(
+                domain, 
+                template_content,
+                target, 
+                cloudflare_auth,
+                str(log_path),  # Convert Path to string for the template
+                additional_config
+            )
+
+            # Save the updated Caddyfile
+            self.logger.info(f"Saving Caddyfile to: {self.caddyfile_path}")
+            parser.file_path = self.caddyfile_path
+            parser.save()
+
+            return str(self.caddyfile_path)  # Return as string for backward compatibility
+
         except Exception as e:
-            raise ProxyError(f"Failed to generate configuration: {str(e)}")
+            raise ProxyError(f"Failed to generate Caddy config: {e}")
     
     def validate_config(self, config_str: str) -> bool:
         """Validate Caddy configuration"""
@@ -504,7 +549,7 @@ class CaddyProxy(ReverseProxy):
             return ProxyStatus(
                 running=running,
                 pid=pid,
-                config_file=self.dirs['config'] / 'Caddyfile',
+                config_file=self.caddyfile_path,
                 error=error
             )
             
@@ -513,7 +558,7 @@ class CaddyProxy(ReverseProxy):
             return ProxyStatus(
                 running=False,
                 pid=None,
-                config_file=self.dirs['config'] / 'Caddyfile',
+                config_file=self.caddyfile_path,
                 error=str(e)
             )
     
@@ -521,7 +566,7 @@ class CaddyProxy(ReverseProxy):
         """Install Caddy binary"""
         try:
             # Get system info
-            from ..utils import get_system_info
+            from ...utils import get_system_info
             import subprocess
             import json
             import os
@@ -565,7 +610,7 @@ class CaddyProxy(ReverseProxy):
                     
                     # Download to temporary location
                     temp_path = Path('/tmp') / binary_name
-                    from ..utils import download_file
+                    from ...utils import download_file
                     if not download_file(url, temp_path):
                         raise ProxyError("Failed to download Caddy binary")
                     
@@ -589,7 +634,7 @@ class CaddyProxy(ReverseProxy):
                 else:
                     # We have permissions, install directly
                     target_path = target_dir / 'caddy'
-                    from ..utils import download_file
+                    from ...utils import download_file
                     if not download_file(url, target_path):
                         raise ProxyError("Failed to download Caddy binary")
                     
@@ -607,7 +652,7 @@ class CaddyProxy(ReverseProxy):
                 binary_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Download binary directly
-                from ..utils import download_file
+                from ...utils import download_file
                 if not download_file(url, self.binary_path):
                     raise ProxyError("Failed to download Caddy binary")
                 

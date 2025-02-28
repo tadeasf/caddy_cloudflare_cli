@@ -1,0 +1,18 @@
+{
+    # Global options
+    admin off  # Disable admin API for security
+    auto_https disable_redirects  # Let Cloudflare handle HTTPS redirects
+    
+    # Email for ACME certificates
+    email {email}
+    
+    # ACME DNS configuration for Cloudflare
+    {acme_dns_config}
+    
+    # Storage configuration
+    storage file_system {
+        root {data_dir}
+    }
+}
+
+# Site blocks will be appended here
