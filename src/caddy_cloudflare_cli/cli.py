@@ -230,8 +230,14 @@ def deploy(
             has_valid_token = bool(config.cloudflare_token and config.cloudflare_token.strip())
             has_valid_api_key = bool(config.cloudflare_api_key and config.cloudflare_api_email and 
                                      config.cloudflare_api_key.strip() and config.cloudflare_api_email.strip())
+            has_valid_dual_tokens = bool(config.cloudflare_zone_token and config.cloudflare_dns_token and
+                                     config.cloudflare_zone_token.strip() and config.cloudflare_dns_token.strip())
             
-            if has_valid_token:
+            if has_valid_dual_tokens:
+                console.print("[blue]Using Zone and DNS Token authentication (least privilege)")
+                console.print(f"Zone Token (masked): {config.cloudflare_zone_token[:4]}...{config.cloudflare_zone_token[-4:] if len(config.cloudflare_zone_token) > 8 else '****'}")
+                console.print(f"DNS Token (masked): {config.cloudflare_dns_token[:4]}...{config.cloudflare_dns_token[-4:] if len(config.cloudflare_dns_token) > 8 else '****'}")
+            elif has_valid_token:
                 console.print("[blue]Using API Token authentication")
                 console.print(f"Token (masked): {config.cloudflare_token[:4]}...{config.cloudflare_token[-4:] if len(config.cloudflare_token) > 8 else '****'}")
             elif has_valid_api_key:
@@ -288,7 +294,9 @@ def deploy(
         # Initialize providers
         try:
             # Show authentication method being used
-            if config.cloudflare_token:
+            if config.cloudflare_zone_token and config.cloudflare_dns_token:
+                console.print("[blue]Using Cloudflare Zone and DNS Tokens for authentication (least privilege)")
+            elif config.cloudflare_token:
                 console.print("[blue]Using Cloudflare API Token for authentication")
             elif config.cloudflare_api_key and config.cloudflare_api_email:
                 console.print("[blue]Using Cloudflare Global API Key for authentication")
@@ -423,12 +431,19 @@ def debug():
         console.print(f"Domain: {config.domain}")
         
         auth_type = "None"
-        if config.cloudflare_token:
+        if config.cloudflare_zone_token and config.cloudflare_dns_token:
+            auth_type = "Zone and DNS Tokens (Least Privilege)"
+        elif config.cloudflare_token:
             auth_type = "API Token"
         elif config.cloudflare_api_key and config.cloudflare_api_email:
             auth_type = "Global API Key"
         
         console.print(f"Authentication Type: {auth_type}")
+        
+        if config.cloudflare_zone_token and config.cloudflare_dns_token:
+            console.print(f"Zone Token (masked): {config.cloudflare_zone_token[:4]}...{config.cloudflare_zone_token[-4:] if len(config.cloudflare_zone_token) > 8 else '****'}")
+            console.print(f"DNS Token (masked): {config.cloudflare_dns_token[:4]}...{config.cloudflare_dns_token[-4:] if len(config.cloudflare_dns_token) > 8 else '****'}")
+                
         console.print(f"Email for certificates: {config.email}")
         console.print(f"Public IP configured: {config.public_ip or 'Not configured (will auto-detect)'}")
         

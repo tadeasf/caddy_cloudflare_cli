@@ -26,6 +26,8 @@ class Config:
     cloudflare_token: str = ""  # API Token (preferred)
     cloudflare_api_key: str = ""  # Global API Key (legacy)
     cloudflare_api_email: str = ""  # Required for Global API Key
+    cloudflare_zone_token: str = ""  # Zone:Read token
+    cloudflare_dns_token: str = ""  # DNS:Edit token
     domain: str = ""
     public_ip: str = ""  # Public IP for DNS records
     
@@ -65,6 +67,11 @@ class Config:
         env_email = os.getenv("CLOUDFLARE_EMAIL")
         env_domain = os.getenv("CLOUDFLARE_DOMAIN")
         env_public_ip = os.getenv("CLOUDFLARE_PUBLIC_IP")
+        env_zone_token = os.getenv("CLOUDFLARE_ZONE_TOKEN")
+        # Also check for misspelled environment variable as fallback
+        if not env_zone_token:
+            env_zone_token = os.getenv("CLOUDLFLARE_ZONE_TOKEN")
+        env_dns_token = os.getenv("CLOUDFLARE_DNS_TOKEN")
         
         if env_token:
             config.cloudflare_token = env_token
@@ -76,6 +83,10 @@ class Config:
             config.domain = env_domain
         if env_public_ip:
             config.public_ip = env_public_ip
+        if env_zone_token:
+            config.cloudflare_zone_token = env_zone_token
+        if env_dns_token:
+            config.cloudflare_dns_token = env_dns_token
             
         return config
     
@@ -104,13 +115,18 @@ class Config:
         env_email = os.getenv("CLOUDFLARE_EMAIL", "")
         env_domain = os.getenv("CLOUDFLARE_DOMAIN", "")
         env_public_ip = os.getenv("CLOUDFLARE_PUBLIC_IP", "")
+        env_zone_token = os.getenv("CLOUDFLARE_ZONE_TOKEN", "")
+        # Also check for misspelled environment variable as fallback
+        if not env_zone_token:
+            env_zone_token = os.getenv("CLOUDLFLARE_ZONE_TOKEN", "")
+        env_dns_token = os.getenv("CLOUDFLARE_DNS_TOKEN", "")
         
         # Determine default authentication method based on available env vars
-        default_auth = "token" if env_token else "global" if (env_key and env_email) else "token"
+        default_auth = "dual" if (env_zone_token and env_dns_token) else "token" if env_token else "global" if (env_key and env_email) else "dual"
         
         auth_type = Prompt.ask(
             "\nAuthentication type",
-            choices=["token", "global"],
+            choices=["dual", "token", "global"],
             default=default_auth
         )
         
@@ -132,7 +148,18 @@ class Config:
             )
         }
         
-        if auth_type == "token":
+        if auth_type == "dual":
+            config_data['cloudflare_zone_token'] = Prompt.ask(
+                "Cloudflare Zone Token (Zone:Read permission)",
+                default=env_zone_token,
+                password=True if not env_zone_token else False
+            )
+            config_data['cloudflare_dns_token'] = Prompt.ask(
+                "Cloudflare DNS Token (DNS:Edit permission)",
+                default=env_dns_token,
+                password=True if not env_dns_token else False
+            )
+        elif auth_type == "token":
             config_data['cloudflare_token'] = Prompt.ask(
                 "Cloudflare API Token",
                 default=env_token,

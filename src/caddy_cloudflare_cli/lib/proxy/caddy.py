@@ -59,15 +59,21 @@ class CaddyProxy(ReverseProxy):
             has_valid_token = bool(self.config.cloudflare_token and self.config.cloudflare_token.strip())
             has_valid_api_key = bool(self.config.cloudflare_api_key and self.config.cloudflare_api_email and 
                                     self.config.cloudflare_api_key.strip() and self.config.cloudflare_api_email.strip())
+            has_valid_dual_tokens = bool(self.config.cloudflare_zone_token and self.config.cloudflare_dns_token and
+                                    self.config.cloudflare_zone_token.strip() and self.config.cloudflare_dns_token.strip())
             
-            if has_valid_token:
-                # Token-based authentication
+            if has_valid_dual_tokens:
+                # Use separate Zone and DNS tokens (preferred for least privilege)
+                logger.info("Using separate Zone and DNS tokens for Caddy (least privilege)")
+                cloudflare_auth = "{\n            zone_token {env.CLOUDFLARE_ZONE_TOKEN}\n            api_token {env.CLOUDFLARE_DNS_TOKEN}\n        }"
+            elif has_valid_token:
+                # Token-based authentication (API token only)
                 logger.info("Using API Token authentication for Caddy")
                 cloudflare_auth = "{env.CLOUDFLARE_API_TOKEN}"
             elif has_valid_api_key:
                 # Global API Key authentication
                 logger.info("Using Global API Key authentication for Caddy")
-                cloudflare_auth = "{env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}"
+                cloudflare_auth = "{\n            api_key {env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}\n        }"
             else:
                 raise ProxyError("No valid Cloudflare authentication method configured")
             
@@ -81,61 +87,54 @@ class CaddyProxy(ReverseProxy):
     storage file_system {{
         root {self.dirs['data']}
     }}
-    
-    # Cloudflare DNS challenge
-    acme_dns cloudflare {cloudflare_auth}
-    }}
+}}
 
-    {config.domain} {{
-        reverse_proxy {config.target} {{
-            # Health checks
-            health_uri /health
-            health_interval 30s
-            health_timeout 10s
-            
-            # Timeouts
-            timeout 30s
-            
-            # Headers
-            header_up Host {config.domain}
-            header_up X-Real-IP {{remote_host}}
-            header_up X-Forwarded-For {{remote_host}}
-            header_up X-Forwarded-Proto {{scheme}}
-        }}
+{config.domain} {{
+    reverse_proxy {config.target} {{
+        # Health checks
+        health_uri /health
+        health_interval 30s
+        health_timeout 10s
         
-        tls {{
-            dns cloudflare {cloudflare_auth}
+        # Headers
+        header_up Host {config.domain}
+        header_up X-Real-IP {{remote_host}}
+        header_up X-Forwarded-For {{remote_host}}
+        header_up X-Forwarded-Proto {{scheme}}
+    }}
+    
+    tls {{
+        dns cloudflare {cloudflare_auth}
+    }}
+    
+    # Logging
+    log {{
+        output file {self.dirs['data']}/access.log {{
+            roll_size 10MB
+            roll_keep 10
         }}
-        
-        # Logging
-        log {{
-            output file {self.dirs['data']}/access.log {{
-                roll_size 10MB
-                roll_keep 10
-            }}
-            format json
-        }}
-        
-        # Security headers
-        header {{
-            # Enable HSTS
-            Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-            # Prevent clickjacking
-            X-Frame-Options "SAMEORIGIN"
-            # XSS protection
-            X-Content-Type-Options "nosniff"
-            X-XSS-Protection "1; mode=block"
-            # Referrer policy
-            Referrer-Policy "strict-origin-when-cross-origin"
-        }}
-    """
+        format json
+    }}
+    
+    # Security headers
+    header {{
+        # Enable HSTS
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Prevent clickjacking
+        X-Frame-Options "SAMEORIGIN"
+        # XSS protection
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        # Referrer policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }}"""
 
             # Add any additional configuration
             if config.additional_config:
                 for key, value in config.additional_config.items():
-                    caddy_config += f"    {key} {value}\n"
+                    caddy_config += f"\n    {key} {value}"
                     
-            caddy_config += "}\n"
+            caddy_config += "\n}\n"
         
             # Write configuration to file
             config_path = self.dirs['config'] / 'Caddyfile'
@@ -191,44 +190,157 @@ class CaddyProxy(ReverseProxy):
             env = os.environ.copy()
             
             # Set Cloudflare credentials based on available authentication method
-            if self.config.cloudflare_token:
+            if self.config.cloudflare_zone_token and self.config.cloudflare_dns_token:
+                logger.info("Using Zone and DNS tokens for Caddy authentication")
+                env['CLOUDFLARE_ZONE_TOKEN'] = self.config.cloudflare_zone_token
+                env['CLOUDFLARE_DNS_TOKEN'] = self.config.cloudflare_dns_token
+            elif self.config.cloudflare_token:
+                logger.info("Using API Token for Caddy authentication")
                 env['CLOUDFLARE_API_TOKEN'] = self.config.cloudflare_token
             elif self.config.cloudflare_api_key and self.config.cloudflare_api_email:
+                logger.info("Using Global API Key for Caddy authentication")
                 env['CLOUDFLARE_API_KEY'] = self.config.cloudflare_api_key
                 env['CLOUDFLARE_EMAIL'] = self.config.cloudflare_api_email
             
             # Start Caddy with proper logging
-            self._process = subprocess.Popen(
-                [
-                    str(self.binary_path),
-                    'run',
-                    '--config', str(config_file),
-                    '--pidfile', str(self._pid_file)
-                ],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True  # Detach from parent process
-            )
+            command = [
+                str(self.binary_path),
+                'run',
+                '--config', str(config_file),
+                '--pidfile', str(self._pid_file)
+            ]
             
-            # Wait for startup
-            time.sleep(2)  # Give Caddy time to start
+            logger.debug(f"Starting Caddy with command: {' '.join(command)}")
+            logger.debug(f"Environment variables: CLOUDFLARE_API_TOKEN={'Set' if 'CLOUDFLARE_API_TOKEN' in env else 'Not set'}, " +
+                        f"CLOUDFLARE_DNS_TOKEN={'Set' if 'CLOUDFLARE_DNS_TOKEN' in env else 'Not set'}, " +
+                        f"CLOUDFLARE_ZONE_TOKEN={'Set' if 'CLOUDFLARE_ZONE_TOKEN' in env else 'Not set'}, " +
+                        f"CLOUDFLARE_API_KEY={'Set' if 'CLOUDFLARE_API_KEY' in env else 'Not set'}, " +
+                        f"CLOUDFLARE_EMAIL={'Set' if 'CLOUDFLARE_EMAIL' in env else 'Not set'}")
             
-            # Check if started successfully
-            if self._process.poll() is not None:
-                error = self._process.stderr.read().decode('utf-8')
-                raise ProxyError(f"Failed to start Caddy: {error}")
-            
-            # Save PID
-            self._save_pid()
-            
-            logger.info(f"Started Caddy server with PID {self._process.pid}")
-            return ProxyStatus(
-                running=True,
-                pid=self._process.pid,
-                config_file=Path(config_file),
-                error=None
-            )
+            # First, try to start normally
+            try:
+                self._process = subprocess.Popen(
+                    command,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True  # Detach from parent process
+                )
+                
+                # Wait for startup
+                time.sleep(2)  # Give Caddy time to start
+                
+                # Check if started successfully
+                if self._process.poll() is not None:
+                    error = self._process.stderr.read().decode('utf-8')
+                    
+                    # Check if we got a permission error and need to use sudo
+                    if "permission denied" in error.lower() and "bind: permission denied" in error.lower():
+                        logger.info("Permission denied for port binding. Attempting to start with sudo...")
+                        
+                        # Use sudo to start Caddy
+                        sudo_command = ["sudo"] + command
+                        logger.debug(f"Starting Caddy with elevated privileges: {' '.join(sudo_command)}")
+                        
+                        # Create a file with the environment variables
+                        env_file = Path('/tmp/caddy_env')
+                        with open(env_file, 'w') as f:
+                            for key, value in env.items():
+                                if key.startswith('CLOUDFLARE_'):
+                                    f.write(f"export {key}='{value}'\n")
+                        
+                        # Make the environment file readable only by current user
+                        env_file.chmod(0o600)
+                        
+                        try:
+                            # Start Caddy with sudo, preserving environment variables
+                            sudo_command_str = f"source {env_file} && " + " ".join(sudo_command)
+                            self._process = subprocess.Popen(
+                                ["sudo", "bash", "-c", sudo_command_str],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                start_new_session=True  # Detach from parent process
+                            )
+                            
+                            # Wait for startup
+                            time.sleep(2)  # Give Caddy time to start
+                            
+                            # Check if started successfully with sudo
+                            if self._process.poll() is not None:
+                                error = self._process.stderr.read().decode('utf-8')
+                                
+                                # Log the full error details
+                                logger.error(f"Caddy failed to start with sudo. Process exited with code {self._process.returncode}")
+                                logger.error(f"Error details: {error}")
+                                
+                                raise ProxyError(f"Failed to start Caddy with elevated privileges: {error[:200]}")
+                            
+                            # Clean up environment file
+                            os.unlink(env_file)
+                            
+                            # Save PID
+                            self._save_pid()
+                            
+                            logger.info(f"Started Caddy server with sudo, PID {self._process.pid}")
+                            return ProxyStatus(
+                                running=True,
+                                pid=self._process.pid,
+                                config_file=Path(config_file),
+                                error=None
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to start Caddy with sudo: {str(e)}")
+                            
+                            # Clean up environment file
+                            if env_file.exists():
+                                os.unlink(env_file)
+                            
+                            raise ProxyError(f"Failed to start Caddy with elevated privileges: {str(e)}")
+                    
+                    # Log the full error details
+                    logger.error(f"Caddy failed to start. Process exited with code {self._process.returncode}")
+                    logger.error(f"Error details: {error}")
+                    
+                    # Extract meaningful error message for the user
+                    error_message = "Failed to start Caddy"
+                    
+                    # Check for common error patterns and provide more helpful messages
+                    if "dns/cloudflare" in error and "unknown directive" in error:
+                        error_message = "Failed to start Caddy: The Cloudflare DNS module is not available. " \
+                                       "Make sure you have the correct Caddy build with the Cloudflare DNS provider enabled."
+                    elif "permission denied" in error.lower():
+                        error_message = "Failed to start Caddy: Permission denied. " \
+                                       "Try running with elevated privileges or check file permissions."
+                    elif "address already in use" in error.lower():
+                        error_message = "Failed to start Caddy: Address already in use. " \
+                                       "Another service might be using port 443 or 80."
+                    elif "invalid caddy environment" in error.lower():
+                        error_message = "Failed to start Caddy: Invalid environment configuration. " \
+                                       "Check your Cloudflare credentials."
+                    elif "no oauth token provided" in error.lower() or "api token" in error.lower():
+                        error_message = "Failed to start Caddy: Authentication error with Cloudflare. " \
+                                       "Check that your API tokens are correct and have the required permissions."
+                    elif error.strip():
+                        # If we have an error but it doesn't match known patterns, include the first part
+                        lines = error.strip().split('\n')
+                        if lines:
+                            error_message = f"Failed to start Caddy: {lines[0][:200]}"
+                    
+                    raise ProxyError(error_message)
+                
+                # Save PID
+                self._save_pid()
+                
+                logger.info(f"Started Caddy server with PID {self._process.pid}")
+                return ProxyStatus(
+                    running=True,
+                    pid=self._process.pid,
+                    config_file=Path(config_file),
+                    error=None
+                )
+                
+            except subprocess.SubprocessError as e:
+                raise ProxyError(f"Failed to execute Caddy: {str(e)}")
             
         except Exception as e:
             error_msg = str(e)
@@ -319,60 +431,105 @@ class CaddyProxy(ReverseProxy):
                 error=str(e)
             )
     
-    def install(self, system_wide: bool = False) -> bool:
+    def install(self, system_wide: bool = True) -> bool:
         """Install Caddy binary"""
         try:
             # Get system info
             from ..utils import get_system_info
+            import subprocess
+            import json
+            import os
             os_type, arch = get_system_info()
             
-            # Download URL from official Caddy site
-            version = "2.7.6"  # Latest stable version
-            os_type = "linux" if os_type == "linux" else "windows" if os_type == "windows" else "darwin"
-            binary_name = f"caddy_{version}_{os_type}_{arch}"
-            url = f"https://github.com/caddyserver/caddy/releases/download/v{version}/{binary_name}.tar.gz"
+            # Try to get the latest version from GitHub API
+            try:
+                logger.info("Checking for latest version of custom Caddy binary...")
+                cmd = ["curl", "-s", "https://api.github.com/repos/tadeasf/caddy_cloudflare_cli/releases/latest"]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    release_info = json.loads(result.stdout)
+                    version = release_info["tag_name"].lstrip("v")
+                    logger.info(f"Found latest version: {version}")
+                else:
+                    # Fallback to known version if API call fails
+                    version = "0.10.0"
+                    logger.warning(f"Could not fetch latest version, using fallback version: {version}")
+            except Exception as e:
+                # Fallback to known version if API call fails
+                version = "0.10.0"
+                logger.warning(f"Error checking latest version: {str(e)}. Using fallback version: {version}")
             
-            # Create binary directory
-            binary_dir = self.binary_path.parent
-            binary_dir.mkdir(parents=True, exist_ok=True)
+            os_type_str = "linux" if os_type == "linux" else "windows" if os_type == "windows" else "darwin"
+            arch_str = "amd64" if arch == "amd64" or arch == "x86_64" else "arm64" if arch == "arm64" else arch
             
-            # Download and extract binary
-            import tempfile
-            import tarfile
-            import shutil
+            # Use the custom binary from the project's GitHub releases
+            binary_name = f"caddy-cloudflare-{os_type_str}-{arch_str}"
+            url = f"https://github.com/tadeasf/caddy_cloudflare_cli/releases/download/v{version}/{binary_name}"
             
-            with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as temp_file:
-                # Download archive
-                from ..utils import download_file
-                if not download_file(url, Path(temp_file.name)):
-                    raise ProxyError("Failed to download Caddy archive")
-                
-                # Extract binary
-                try:
-                    with tarfile.open(temp_file.name, 'r:gz') as tar:
-                        caddy_binary = tar.extractfile('caddy')
-                        if caddy_binary is None:
-                            raise ProxyError("Caddy binary not found in archive")
-                        with open(self.binary_path, 'wb') as f:
-                            shutil.copyfileobj(caddy_binary, f)
-                except Exception as e:
-                    raise ProxyError(f"Failed to extract Caddy binary: {str(e)}")
-                finally:
-                    # Cleanup
-                    Path(temp_file.name).unlink(missing_ok=True)
+            logger.info(f"Downloading custom Caddy binary with Cloudflare DNS plugin from: {url}")
             
-            # Make executable
-            self.binary_path.chmod(0o755)
-            
-            # Create symlink if system-wide
+            # Determine installation location based on system_wide flag
             if system_wide:
-                symlink = Path('/usr/local/bin/caddy')
-                if symlink.exists():
-                    symlink.unlink()
-                symlink.symlink_to(self.binary_path)
-            
-            logger.info(f"Installed Caddy binary at {self.binary_path}")
-            return True
+                # For system-wide install, use /usr/local/bin
+                target_dir = Path('/usr/local/bin')
+                
+                # Check if we have permission to write to system directory
+                if not os.access(target_dir, os.W_OK):
+                    logger.warning("No write permissions for system directory. Attempting with sudo...")
+                    
+                    # Download to temporary location
+                    temp_path = Path('/tmp') / binary_name
+                    from ..utils import download_file
+                    if not download_file(url, temp_path):
+                        raise ProxyError("Failed to download Caddy binary")
+                    
+                    # Make executable
+                    temp_path.chmod(0o755)
+                    
+                    # Move to system location with sudo
+                    target_path = target_dir / 'caddy'
+                    cmd = ["sudo", "mv", str(temp_path), str(target_path)]
+                    result = subprocess.run(cmd)
+                    if result.returncode != 0:
+                        raise ProxyError("Failed to move Caddy binary to system directory. Try running with sudo.")
+                    
+                    # Set permissions with sudo
+                    subprocess.run(["sudo", "chmod", "755", str(target_path)])
+                    
+                    # Set binary path to system location
+                    self.binary_path = target_path
+                    logger.info(f"Installed custom Caddy binary with Cloudflare DNS plugin at {target_path}")
+                    return True
+                else:
+                    # We have permissions, install directly
+                    target_path = target_dir / 'caddy'
+                    from ..utils import download_file
+                    if not download_file(url, target_path):
+                        raise ProxyError("Failed to download Caddy binary")
+                    
+                    # Make executable
+                    target_path.chmod(0o755)
+                    
+                    # Set binary path to system location
+                    self.binary_path = target_path
+                    logger.info(f"Installed custom Caddy binary with Cloudflare DNS plugin at {target_path}")
+                    return True
+            else:
+                # User installation
+                # Create binary directory
+                binary_dir = self.binary_path.parent
+                binary_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Download binary directly
+                from ..utils import download_file
+                if not download_file(url, self.binary_path):
+                    raise ProxyError("Failed to download Caddy binary")
+                
+                # Make executable
+                self.binary_path.chmod(0o755)
+                
+                logger.info(f"Installed custom Caddy binary with Cloudflare DNS plugin at {self.binary_path}")
+                return True
             
         except Exception as e:
             logger.error(f"Failed to install Caddy: {str(e)}")
