@@ -27,6 +27,7 @@ class CaddyProxy(ReverseProxy):
             dir_path.mkdir(parents=True, exist_ok=True)
             
         self._process = None
+        self._pid = None
         self._pid_file = self.dirs['data'] / 'caddy.pid'
         
         # Try to restore existing process
@@ -37,19 +38,21 @@ class CaddyProxy(ReverseProxy):
         if self._pid_file.exists():
             try:
                 pid = int(self._pid_file.read_text().strip())
-                os.kill(pid, 0)  # Check if process exists
-                self._process = subprocess.Popen(
-                    pid=pid,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                logger.info(f"Restored Caddy process with PID {pid}")
+                # Check if process exists by sending signal 0
+                os.kill(pid, 0)
+                # Process exists, store the PID
+                self._pid = pid
+                logger.info(f"Detected existing Caddy process with PID {pid}")
             except (ProcessLookupError, ValueError, OSError):
+                # Process doesn't exist or invalid PID
+                logger.debug("No valid existing Caddy process found")
                 self._pid_file.unlink(missing_ok=True)
+                self._pid = None
     
     def _save_pid(self):
         """Save process PID to file"""
         if self._process and self._process.pid:
+            self._pid = self._process.pid
             self._pid_file.write_text(str(self._process.pid))
     
     def generate_config(self, config: ProxyConfig) -> str:
@@ -62,26 +65,37 @@ class CaddyProxy(ReverseProxy):
             has_valid_dual_tokens = bool(self.config.cloudflare_zone_token and self.config.cloudflare_dns_token and
                                     self.config.cloudflare_zone_token.strip() and self.config.cloudflare_dns_token.strip())
             
+            # Determine which Cloudflare auth method to use for acme_dns
+            acme_dns_auth = ""
             if has_valid_dual_tokens:
                 # Use separate Zone and DNS tokens (preferred for least privilege)
                 logger.info("Using separate Zone and DNS tokens for Caddy (least privilege)")
                 cloudflare_auth = "{\n            zone_token {env.CLOUDFLARE_ZONE_TOKEN}\n            api_token {env.CLOUDFLARE_DNS_TOKEN}\n        }"
+                acme_dns_auth = "{env.CLOUDFLARE_DNS_TOKEN}"
             elif has_valid_token:
                 # Token-based authentication (API token only)
                 logger.info("Using API Token authentication for Caddy")
                 cloudflare_auth = "{env.CLOUDFLARE_API_TOKEN}"
+                acme_dns_auth = "{env.CLOUDFLARE_API_TOKEN}"
             elif has_valid_api_key:
                 # Global API Key authentication
                 logger.info("Using Global API Key authentication for Caddy")
                 cloudflare_auth = "{\n            api_key {env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}\n        }"
+                acme_dns_auth = "{\n        api_key {env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}\n    }"
             else:
                 raise ProxyError("No valid Cloudflare authentication method configured")
             
-            # Basic Caddyfile configuration
+            # Basic Caddyfile configuration with enhanced Cloudflare settings
             caddy_config = f"""{{
     # Global options
     admin off  # Disable admin API for security
     auto_https disable_redirects  # Let Cloudflare handle HTTPS redirects
+    
+    # Email for ACME certificates
+    email {self.config.email}
+    
+    # ACME DNS configuration for Cloudflare
+    acme_dns cloudflare {acme_dns_auth}
     
     # Storage configuration
     storage file_system {{
@@ -96,6 +110,13 @@ class CaddyProxy(ReverseProxy):
         health_interval 30s
         health_timeout 10s
         
+        # Extended timeouts for better reliability
+        transport http {{
+            read_timeout 300s
+            write_timeout 300s
+            dial_timeout 30s
+        }}
+        
         # Headers
         header_up Host {config.domain}
         header_up X-Real-IP {{remote_host}}
@@ -105,6 +126,7 @@ class CaddyProxy(ReverseProxy):
     
     tls {{
         dns cloudflare {cloudflare_auth}
+        resolvers 1.1.1.1  # Use Cloudflare DNS resolver
     }}
     
     # Logging
@@ -127,6 +149,8 @@ class CaddyProxy(ReverseProxy):
         X-XSS-Protection "1; mode=block"
         # Referrer policy
         Referrer-Policy "strict-origin-when-cross-origin"
+        # Remove server header
+        -Server
     }}"""
 
             # Add any additional configuration
@@ -354,48 +378,98 @@ class CaddyProxy(ReverseProxy):
     
     def stop(self) -> bool:
         """Stop Caddy server"""
-        if not self._process:
+        if not self._process and not self._pid:
             return True
             
         try:
-            # Try graceful shutdown first
-            self._process.send_signal(signal.SIGTERM)
-            try:
-                self._process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                # Force kill if graceful shutdown fails
-                self._process.kill()
-                self._process.wait(timeout=5)
+            if self._process:
+                # Try graceful shutdown first for process we started
+                self._process.send_signal(signal.SIGTERM)
+                try:
+                    self._process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    # Force kill if graceful shutdown fails
+                    self._process.kill()
+                    self._process.wait(timeout=5)
+                self._process = None
+            elif self._pid:
+                # Try to stop an existing process we didn't start
+                try:
+                    # Try graceful shutdown first
+                    os.kill(self._pid, signal.SIGTERM)
+                    
+                    # Wait for process to exit
+                    for _ in range(10):
+                        time.sleep(1)
+                        try:
+                            # Check if process still exists
+                            os.kill(self._pid, 0)
+                        except ProcessLookupError:
+                            # Process is gone
+                            break
+                    else:
+                        # Process didn't exit in time, force kill
+                        try:
+                            os.kill(self._pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            # Already dead
+                            pass
+                except ProcessLookupError:
+                    # Process already gone
+                    pass
             
             # Clean up PID file
             self._pid_file.unlink(missing_ok=True)
+            self._pid = None
             
             logger.info("Stopped Caddy server")
             return True
             
         except Exception as e:
+            logger.error(f"Failed to stop Caddy: {str(e)}")
             raise ProxyError(f"Failed to stop Caddy: {str(e)}")
         finally:
             self._process = None
+            self._pid = None
     
     def reload(self) -> bool:
         """Reload Caddy configuration"""
-        if not self._process or self._process.poll() is not None:
+        if not self._process and not self._pid:
             raise ProxyError("Caddy is not running")
             
         try:
-            # Send SIGHUP for config reload
-            self._process.send_signal(signal.SIGHUP)
-            
-            # Wait briefly and check if process is still running
-            time.sleep(1)
-            if self._process.poll() is not None:
-                raise ProxyError("Caddy stopped during reload")
+            if self._process and self._process.poll() is None:
+                # Send SIGHUP for config reload
+                self._process.send_signal(signal.SIGHUP)
+                
+                # Wait briefly and check if process is still running
+                time.sleep(1)
+                if self._process.poll() is not None:
+                    raise ProxyError("Caddy stopped during reload")
+            elif self._pid:
+                # Send SIGHUP to process we're tracking by PID
+                try:
+                    os.kill(self._pid, signal.SIGHUP)
+                    time.sleep(1)
+                    
+                    # Verify process still exists
+                    try:
+                        os.kill(self._pid, 0)
+                    except ProcessLookupError:
+                        raise ProxyError("Caddy stopped during reload")
+                except ProcessLookupError:
+                    raise ProxyError("Caddy is not running")
+            else:
+                raise ProxyError("Caddy is not running")
             
             logger.info("Reloaded Caddy configuration")
             return True
             
+        except ProxyError:
+            # Re-raise proxy errors
+            raise
         except Exception as e:
+            logger.error(f"Failed to reload Caddy: {str(e)}")
             raise ProxyError(f"Failed to reload Caddy: {str(e)}")
     
     def status(self) -> ProxyStatus:
@@ -411,8 +485,20 @@ class CaddyProxy(ReverseProxy):
                     running = True
                     pid = self._process.pid
                 else:
-                    error = self._process.stderr.read().decode('utf-8')
+                    error = self._process.stderr.read().decode('utf-8') if self._process.stderr else "Process exited"
                     self._process = None
+                    self._pid = None
+                    self._pid_file.unlink(missing_ok=True)
+            elif self._pid:
+                # Check if tracked PID is still running
+                try:
+                    os.kill(self._pid, 0)
+                    running = True
+                    pid = self._pid
+                except ProcessLookupError:
+                    # Process no longer exists
+                    error = "Process not found"
+                    self._pid = None
                     self._pid_file.unlink(missing_ok=True)
             
             return ProxyStatus(
