@@ -22,7 +22,7 @@ certifi==2025.1.31
 charset-normalizer==3.4.1
     # via requests
 click==8.1.8
-    # via caddy-cloudflare-cli
+    # via typer
 cloudflare==4.0.0
     # via caddy-cloudflare-cli
 distro==1.9.0
@@ -54,14 +54,19 @@ pyyaml==6.0.2
 requests==2.32.3
     # via caddy-cloudflare-cli
 rich==13.9.4
-    # via caddy-cloudflare-cli
+    # via typer
+shellingham==1.5.4
+    # via typer
 sniffio==1.3.1
     # via anyio
     # via cloudflare
+typer==0.15.2
+    # via caddy-cloudflare-cli
 typing-extensions==4.12.2
     # via anyio
     # via cloudflare
     # via pydantic
     # via pydantic-core
+    # via typer
 urllib3==2.3.0
     # via requests

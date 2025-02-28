@@ -6,11 +6,14 @@ import re
 import random
 import string
 import socket
-import requests
 import platform
+import logging
 from pathlib import Path
 from typing import Optional, Tuple
 from functools import lru_cache
+import requests  # Add requests for HTTP requests
+
+logger = logging.getLogger(__name__)
 
 def validate_subdomain(subdomain: str) -> bool:
     """
@@ -22,8 +25,18 @@ def validate_subdomain(subdomain: str) -> bool:
     Returns:
         True if valid
     """
+    # Empty subdomains are not valid (use generate_random_subdomain instead)
     if not subdomain:
-        return True
+        return False
+        
+    # Reject '@' which is used for root domains in Cloudflare
+    if subdomain == '@':
+        return False
+        
+    # Validate subdomain format:
+    # - Must start and end with a letter or number
+    # - Can contain letters, numbers, and hyphens
+    # - Must be between 1 and 63 characters
     pattern = r'^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
     return bool(re.match(pattern, subdomain))
 
@@ -50,10 +63,7 @@ def generate_random_subdomain(length: int = 8) -> str:
         Random subdomain string
     """
     chars = string.ascii_lowercase + string.digits
-    while True:
-        subdomain = ''.join(random.choice(chars) for _ in range(length))
-        if validate_subdomain(subdomain):
-            return subdomain
+    return ''.join(random.choice(chars) for _ in range(length))
 
 def is_port_available(port: int, host: str = 'localhost') -> bool:
     """
@@ -105,10 +115,19 @@ def get_system_info() -> Tuple[str, str]:
         'x86_64': 'amd64',
         'amd64': 'amd64',
         'aarch64': 'arm64',
-        'arm64': 'arm64'
+        'arm64': 'arm64',
+        'armv7l': 'arm',
+        'armv6l': 'arm'
     }
     
-    return os_type, arch_map.get(arch, arch)
+    # Normalize OS names
+    os_map = {
+        'darwin': 'darwin',
+        'linux': 'linux',
+        'windows': 'windows'
+    }
+    
+    return os_map.get(os_type, os_type), arch_map.get(arch, arch)
 
 def download_file(url: str, target: Path, show_progress: bool = True) -> bool:
     """
@@ -123,7 +142,14 @@ def download_file(url: str, target: Path, show_progress: bool = True) -> bool:
         True if successful
     """
     try:
-        response = requests.get(url, stream=True)
+        from rich.progress import Progress, DownloadColumn, TransferSpeedColumn
+        from requests.exceptions import RequestException
+
+        # Create request with timeout and proper headers
+        headers = {
+            'User-Agent': 'caddy-cloudflare-cli/1.0'
+        }
+        response = requests.get(url, stream=True, headers=headers, timeout=30)
         response.raise_for_status()
         
         total = int(response.headers.get('content-length', 0))
@@ -132,19 +158,30 @@ def download_file(url: str, target: Path, show_progress: bool = True) -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
         
         with open(target, 'wb') as f:
-            if show_progress:
-                from rich.progress import Progress
-                with Progress() as progress:
-                    task = progress.add_task("[cyan]Downloading...", total=total)
+            if show_progress and total > 0:
+                with Progress(
+                    "[progress.description]{task.description}",
+                    DownloadColumn(),
+                    TransferSpeedColumn(),
+                    "[progress.percentage]{task.percentage:>3.0f}%",
+                ) as progress:
+                    task = progress.add_task(f"Downloading {target.name}", total=total)
                     for data in response.iter_content(chunk_size=8192):
-                        f.write(data)
-                        progress.update(task, advance=len(data))
+                        size = f.write(data)
+                        progress.update(task, advance=size)
             else:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
         
         return True
-    except Exception:
+        
+    except RequestException as e:
+        logger.error(f"Download failed: {str(e)}")
+        if target.exists():
+            target.unlink()
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error during download: {str(e)}")
         if target.exists():
             target.unlink()
         return False
@@ -163,3 +200,27 @@ def ensure_permissions(path: Path, mode: int = 0o755) -> None:
 def normalize_path(path: str) -> str:
     """Normalize file path"""
     return path.replace('\\', '/')
+
+def get_public_ip() -> str:
+    """Get the public IP address of the current machine"""
+    import requests
+    
+    # List of services that can return the public IP
+    services = [
+        "https://api.ipify.org",
+        "https://ipinfo.io/ip",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com"
+    ]
+    
+    for service in services:
+        try:
+            response = requests.get(service, timeout=5)
+            if response.status_code == 200:
+                ip = response.text.strip()
+                return ip
+        except Exception:
+            continue
+    
+    # If all services fail, raise an exception
+    raise Exception("Could not determine public IP address")

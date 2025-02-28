@@ -2,7 +2,7 @@
 Base class for DNS providers
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, List
+from typing import Optional, List
 from dataclasses import dataclass
 
 @dataclass

@@ -5,7 +5,7 @@ from typing import Type, Dict, Optional
 
 from .config import Config
 from .dns.base import DNSProvider
-from .dns.cloudflare import CloudflareDNS
+from .dns.cloudflare_api_handler import CloudflareDNS
 from .proxy.base import ReverseProxy
 from .proxy.caddy import CaddyProxy
 

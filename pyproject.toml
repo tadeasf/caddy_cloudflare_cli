@@ -6,15 +6,14 @@ authors = [
     { name = "Tadeas Fort", email = "business@tadeasfort.com" }
 ]
 dependencies = [
-    "click>=8.1.8",
-    "cloudflare>=2.8.15",
     "pyyaml>=6.0.1",
     "python-dotenv>=1.0.0",
-    "rich>=13.9.4",
-    "requests>=2.31.0"
+    "requests>=2.31.0",
+    "typer>=0.15.2",
+    "cloudflare>=4.0.0",
 ]
 readme = "README.md"
-requires-python = ">= 3.8"
+requires-python = ">= 3.11"
 license = { text = "GPL-3.0" }
 
 [build-system]
@@ -27,7 +26,20 @@ dev-dependencies = [
     "pytest>=8.3.4",
     "ruff>=0.9.7",
     "ruff-lsp>=0.0.62",
+    "pytest-mock>=3.12.0",
+    "pytest-cov>=4.1.0",
+    "responses>=0.25.0"
 ]
 
 [project.scripts]
 caddy-cloudflare = "caddy_cloudflare_cli.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["src/caddy_cloudflare_cli/tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=src/caddy_cloudflare_cli --cov-report=term-missing"
+pythonpath = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["caddy_cloudflare_cli"]

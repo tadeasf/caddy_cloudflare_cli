@@ -6,8 +6,6 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, Optional, List
-import requests
 import logging
 
 from ..config import Config
@@ -46,7 +44,7 @@ class CaddyProxy(ReverseProxy):
                     stderr=subprocess.PIPE
                 )
                 logger.info(f"Restored Caddy process with PID {pid}")
-            except (ProcessLookupError, ValueError):
+            except (ProcessLookupError, ValueError, OSError):
                 self._pid_file.unlink(missing_ok=True)
     
     def _save_pid(self):
@@ -57,6 +55,22 @@ class CaddyProxy(ReverseProxy):
     def generate_config(self, config: ProxyConfig) -> str:
         """Generate Caddy configuration"""
         try:
+            # Determine which Cloudflare auth method to use
+            has_valid_token = bool(self.config.cloudflare_token and self.config.cloudflare_token.strip())
+            has_valid_api_key = bool(self.config.cloudflare_api_key and self.config.cloudflare_api_email and 
+                                    self.config.cloudflare_api_key.strip() and self.config.cloudflare_api_email.strip())
+            
+            if has_valid_token:
+                # Token-based authentication
+                logger.info("Using API Token authentication for Caddy")
+                cloudflare_auth = "{env.CLOUDFLARE_API_TOKEN}"
+            elif has_valid_api_key:
+                # Global API Key authentication
+                logger.info("Using Global API Key authentication for Caddy")
+                cloudflare_auth = "{env.CLOUDFLARE_EMAIL} {env.CLOUDFLARE_API_KEY}"
+            else:
+                raise ProxyError("No valid Cloudflare authentication method configured")
+            
             # Basic Caddyfile configuration
             caddy_config = f"""{{
     # Global options
@@ -69,52 +83,52 @@ class CaddyProxy(ReverseProxy):
     }}
     
     # Cloudflare DNS challenge
-    acme_dns cloudflare {{env.CF_API_TOKEN}}
-}}
+    acme_dns cloudflare {cloudflare_auth}
+    }}
 
-{config.domain} {{
-    reverse_proxy {config.target} {{
-        # Health checks
-        health_uri /health
-        health_interval 30s
-        health_timeout 10s
-        
-        # Timeouts
-        timeout 30s
-        
-        # Headers
-        header_up Host {config.domain}
-        header_up X-Real-IP {{remote_host}}
-        header_up X-Forwarded-For {{remote_host}}
-        header_up X-Forwarded-Proto {{scheme}}
-    }}
-    
-    tls {{
-        dns cloudflare {{env.CF_API_TOKEN}}
-    }}
-    
-    # Logging
-    log {{
-        output file {self.dirs['data']}/access.log {{
-            roll_size 10MB
-            roll_keep 10
+    {config.domain} {{
+        reverse_proxy {config.target} {{
+            # Health checks
+            health_uri /health
+            health_interval 30s
+            health_timeout 10s
+            
+            # Timeouts
+            timeout 30s
+            
+            # Headers
+            header_up Host {config.domain}
+            header_up X-Real-IP {{remote_host}}
+            header_up X-Forwarded-For {{remote_host}}
+            header_up X-Forwarded-Proto {{scheme}}
         }}
-        format json
-    }}
-    
-    # Security headers
-    header {{
-        # Enable HSTS
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        # Prevent clickjacking
-        X-Frame-Options "SAMEORIGIN"
-        # XSS protection
-        X-Content-Type-Options "nosniff"
-        X-XSS-Protection "1; mode=block"
-        # Referrer policy
-        Referrer-Policy "strict-origin-when-cross-origin"
-}}
-"""
+        
+        tls {{
+            dns cloudflare {cloudflare_auth}
+        }}
+        
+        # Logging
+        log {{
+            output file {self.dirs['data']}/access.log {{
+                roll_size 10MB
+                roll_keep 10
+            }}
+            format json
+        }}
+        
+        # Security headers
+        header {{
+            # Enable HSTS
+            Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+            # Prevent clickjacking
+            X-Frame-Options "SAMEORIGIN"
+            # XSS protection
+            X-Content-Type-Options "nosniff"
+            X-XSS-Protection "1; mode=block"
+            # Referrer policy
+            Referrer-Policy "strict-origin-when-cross-origin"
+        }}
+    """
 
             # Add any additional configuration
             if config.additional_config:
@@ -123,7 +137,7 @@ class CaddyProxy(ReverseProxy):
                     
             caddy_config += "}\n"
         
-        # Write configuration to file
+            # Write configuration to file
             config_path = self.dirs['config'] / 'Caddyfile'
             config_path.write_text(caddy_config)
             logger.info(f"Generated Caddy configuration at {config_path}")
@@ -136,21 +150,29 @@ class CaddyProxy(ReverseProxy):
     def validate_config(self, config_str: str) -> bool:
         """Validate Caddy configuration"""
         try:
-            if not Path(config_str).exists():
+            config_path = Path(config_str)
+            if not config_path.exists():
                 raise ProxyError(f"Configuration file not found: {config_str}")
                 
+            if not self.binary_path.exists():
+                raise ProxyError("Caddy binary not found. Please run 'caddy-cloudflare install' first.")
+                
             result = subprocess.run(
-                [str(self.binary_path), 'validate', '-config', config_str],
+                [str(self.binary_path), 'validate', '--config', str(config_path)],
                 capture_output=True,
                 text=True,
-                check=True
+                check=False  # Don't raise exception on non-zero exit
             )
             
+            if result.returncode != 0:
+                logger.error(f"Configuration validation failed: {result.stderr}")
+                return False
+                
             logger.info("Configuration validation successful")
             return True
             
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Configuration validation failed: {e.stderr}")
+        except subprocess.SubprocessError as e:
+            logger.error(f"Configuration validation failed: {str(e)}")
             return False
         except Exception as e:
             raise ProxyError(f"Failed to validate configuration: {str(e)}")
@@ -167,15 +189,21 @@ class CaddyProxy(ReverseProxy):
             
             # Prepare environment
             env = os.environ.copy()
-            env['CF_API_TOKEN'] = self.config.cloudflare_token
+            
+            # Set Cloudflare credentials based on available authentication method
+            if self.config.cloudflare_token:
+                env['CLOUDFLARE_API_TOKEN'] = self.config.cloudflare_token
+            elif self.config.cloudflare_api_key and self.config.cloudflare_api_email:
+                env['CLOUDFLARE_API_KEY'] = self.config.cloudflare_api_key
+                env['CLOUDFLARE_EMAIL'] = self.config.cloudflare_api_email
             
             # Start Caddy with proper logging
             self._process = subprocess.Popen(
                 [
                     str(self.binary_path),
                     'run',
-                    '-config', str(config_file),
-                    '-pidfile', str(self._pid_file)
+                    '--config', str(config_file),
+                    '--pidfile', str(self._pid_file)
                 ],
                 env=env,
                 stdout=subprocess.PIPE,
@@ -298,18 +326,40 @@ class CaddyProxy(ReverseProxy):
             from ..utils import get_system_info
             os_type, arch = get_system_info()
             
-            # Download URL
-            version = "v2.7.6"  # Latest stable version
-            binary_name = f"caddy-cloudflare-{os_type}-{arch}"
-            url = f"https://github.com/tadeasf/caddy-cloudflare-cli/releases/download/{version}/{binary_name}"
+            # Download URL from official Caddy site
+            version = "2.7.6"  # Latest stable version
+            os_type = "linux" if os_type == "linux" else "windows" if os_type == "windows" else "darwin"
+            binary_name = f"caddy_{version}_{os_type}_{arch}"
+            url = f"https://github.com/caddyserver/caddy/releases/download/v{version}/{binary_name}.tar.gz"
             
             # Create binary directory
-            self.binary_path.parent.mkdir(parents=True, exist_ok=True)
+            binary_dir = self.binary_path.parent
+            binary_dir.mkdir(parents=True, exist_ok=True)
             
-            # Download binary
-            from ..utils import download_file
-            if not download_file(url, self.binary_path):
-                raise ProxyError("Failed to download Caddy binary")
+            # Download and extract binary
+            import tempfile
+            import tarfile
+            import shutil
+            
+            with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as temp_file:
+                # Download archive
+                from ..utils import download_file
+                if not download_file(url, Path(temp_file.name)):
+                    raise ProxyError("Failed to download Caddy archive")
+                
+                # Extract binary
+                try:
+                    with tarfile.open(temp_file.name, 'r:gz') as tar:
+                        caddy_binary = tar.extractfile('caddy')
+                        if caddy_binary is None:
+                            raise ProxyError("Caddy binary not found in archive")
+                        with open(self.binary_path, 'wb') as f:
+                            shutil.copyfileobj(caddy_binary, f)
+                except Exception as e:
+                    raise ProxyError(f"Failed to extract Caddy binary: {str(e)}")
+                finally:
+                    # Cleanup
+                    Path(temp_file.name).unlink(missing_ok=True)
             
             # Make executable
             self.binary_path.chmod(0o755)
@@ -325,7 +375,10 @@ class CaddyProxy(ReverseProxy):
             return True
             
         except Exception as e:
-            raise ProxyError(f"Failed to install Caddy: {str(e)}")
+            logger.error(f"Failed to install Caddy: {str(e)}")
+            if self.binary_path.exists():
+                self.binary_path.unlink()
+            return False
     
     def uninstall(self) -> bool:
         """Uninstall Caddy"""

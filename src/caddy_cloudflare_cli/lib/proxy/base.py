@@ -3,7 +3,7 @@ Base class for reverse proxy servers
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from pathlib import Path
 
 @dataclass
