@@ -1,7 +1,7 @@
 [project]
 name = "caddy-cloudflare-cli"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "A powerful CLI tool for setting up and managing Cloudflare DNS records with Caddy reverse proxy. Easily deploy local services with public domains, automate DNS configuration, and manage SSL certificates using Cloudflare's API."
 authors = [
     { name = "Tadeas Fort", email = "business@tadeasfort.com" }
 ]
