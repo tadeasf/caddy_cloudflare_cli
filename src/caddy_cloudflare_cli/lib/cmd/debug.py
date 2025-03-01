@@ -9,7 +9,7 @@ from rich.console import Console
 
 from ..config import Config, ConfigError
 from ..dns.cloudflare_api_handler import CloudflareDNS
-from ..utils import get_public_ip
+import caddy_cloudflare_cli.lib.utils as utils
 
 console = Console()
 
@@ -54,11 +54,22 @@ def debug_command():
             has_valid_token = bool(config.cloudflare_token and config.cloudflare_token.strip())
             has_valid_api_key = bool(config.cloudflare_api_key and config.cloudflare_api_email and 
                                     config.cloudflare_api_key.strip() and config.cloudflare_api_email.strip())
+            has_valid_dual_tokens = bool(config.cloudflare_zone_token and config.cloudflare_dns_token and
+                                    config.cloudflare_zone_token.strip() and config.cloudflare_dns_token.strip())
             
-            if has_valid_token:
+            if has_valid_dual_tokens:
+                console.print("[blue]Testing with Zone and DNS Token authentication (least privilege)")
+                console.print(f"Zone Token (masked): {config.cloudflare_zone_token[:4]}...{config.cloudflare_zone_token[-4:] if len(config.cloudflare_zone_token) > 8 else '****'}")
+                console.print(f"DNS Token (masked): {config.cloudflare_dns_token[:4]}...{config.cloudflare_dns_token[-4:] if len(config.cloudflare_dns_token) > 8 else '****'}")
+                # For zone operations use the zone token
+                cf_zone = Cloudflare(api_token=config.cloudflare_zone_token)
+                # For DNS operations use the DNS token
+                cf = Cloudflare(api_token=config.cloudflare_dns_token)
+            elif has_valid_token:
                 console.print("[blue]Testing with API Token...")
                 console.print(f"Token (masked): {config.cloudflare_token[:4]}...{config.cloudflare_token[-4:] if len(config.cloudflare_token) > 8 else '****'}")
                 cf = Cloudflare(api_token=config.cloudflare_token)
+                cf_zone = cf
             elif has_valid_api_key:
                 console.print("[blue]Testing with Global API Key...")
                 console.print(f"API Email: {config.cloudflare_api_email}")
@@ -67,6 +78,7 @@ def debug_command():
                     api_key=config.cloudflare_api_key,
                     api_email=config.cloudflare_api_email
                 )
+                cf_zone = cf
             else:
                 console.print("[bold red]No valid Cloudflare credentials found")
                 return
@@ -75,144 +87,149 @@ def debug_command():
             console.print("[blue]Testing API access...")
             
             if config.domain:
-                # Try to find the zone
-                zones = cf.zones.list(name=config.domain)
-                
-                if zones and hasattr(zones, 'result') and zones.result:
-                    # Handle Zone object correctly
-                    zone = zones.result[0]
-                    zone_id = None
+                # Try to find the zone using the zone token client
+                try:
+                    zones = cf_zone.zones.list(name=config.domain)
                     
-                    # Try to extract zone ID
-                    if hasattr(zone, 'id'):
-                        zone_id = zone.id
-                    elif isinstance(zone, dict) and 'id' in zone:
-                        zone_id = zone['id']
+                    if zones and hasattr(zones, 'result') and zones.result:
+                        # Handle Zone object correctly
+                        zone = zones.result[0]
+                        zone_id = None
                         
-                    if zone_id:
-                        console.print(f"[bold green]✓ Successfully found zone for {config.domain}")
-                        console.print(f"  Zone ID: {zone_id}")
-                        
-                        try:
-                            # Try to list DNS records
-                            records = cf.dns.records.list(zone_id=zone_id)
-                            record_count = 0
+                        # Try to extract zone ID
+                        if hasattr(zone, 'id'):
+                            zone_id = zone.id
+                        elif isinstance(zone, dict) and 'id' in zone:
+                            zone_id = zone['id']
                             
-                            if hasattr(records, 'result'):
-                                record_count = len(records.result)
-                            elif isinstance(records, list):
-                                record_count = len(records)
+                        if zone_id:
+                            console.print(f"[bold green]✓ Successfully found zone for {config.domain}")
+                            console.print(f"  Zone ID: {zone_id}")
+                            
+                            try:
+                                # Try to list DNS records using the DNS token client
+                                records = cf.dns.records.list(zone_id=zone_id)
+                                record_count = 0
                                 
-                            console.print(f"[bold green]✓ Successfully retrieved {record_count} DNS records")
-                            
-                            # Test creating a DNS record (dry run)
-                            console.print("\n[bold blue]Testing DNS record creation formats...")
-                            
-                            # Test different record formats
-                            test_formats = [
-                                {"name": f"test-{int(time.time())}", "description": "Random subdomain"},
-                                {"name": "@", "description": "Root domain"},
-                                {"name": config.domain, "description": "Full domain"},
-                                {"name": f"test.{config.domain}", "description": "Fully qualified domain"},
-                            ]
-                            
-                            for test in test_formats:
-                                console.print(f"[blue]Testing format: {test['description']} ({test['name']})")
-                                # Just simulate the data we would send, don't actually create it
-                                try:
-                                    # Create a DNS handler
-                                    CloudflareDNS(config)
+                                if hasattr(records, 'result'):
+                                    record_count = len(records.result)
+                                elif isinstance(records, list):
+                                    record_count = len(records)
                                     
-                                    # Create the DNS record data (for validation only)
-                                    api_format_name = None
-                                    display_name = None
-                                    
-                                    if test['name'] == "@":
-                                        # Root domain - use @ for Cloudflare API
-                                        api_format_name = "@"
-                                        display_name = config.domain
-                                        console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
-                                        console.print(f"[blue]→ Would create record for: '{display_name}'")
-                                    elif test['name'] == config.domain:
-                                        # Full domain = root domain in Cloudflare API
-                                        api_format_name = "@"
-                                        display_name = config.domain
-                                        console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
-                                        console.print(f"[blue]→ Would create record for: '{display_name}'")
-                                    elif test['name'].endswith(f".{config.domain}"):
-                                        # Extract just the subdomain part
-                                        subdomain = test['name'].replace(f".{config.domain}", "")
-                                        api_format_name = subdomain
-                                        display_name = test['name']
-                                        console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
-                                        console.print(f"[blue]→ Would create record for: '{display_name}'")
-                                    else:
-                                        # Regular subdomain
-                                        api_format_name = test['name']
-                                        display_name = f"{test['name']}.{config.domain}"
-                                        console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
-                                        console.print(f"[blue]→ Would create record for: '{display_name}'")
-                                    
-                                    # Show what the API call would look like
-                                    console.print("[blue]Example API call:")
-                                    console.print("[blue]cf.dns.records.create(")
-                                    console.print("[blue]    zone_id='{zone_id}',")
-                                    console.print("[blue]    type='A',")
-                                    console.print("[blue]    name='{api_format_name}',")
-                                    console.print("[blue]    content='1.2.3.4'")
-                                    console.print("[blue])")
-                                    
-                                    console.print("[green]✓ Format validation successful")
-                                except Exception as e:
-                                    console.print(f"[bold red]× Format validation failed: {str(e)}")
+                                console.print(f"[bold green]✓ Successfully retrieved {record_count} DNS records")
                                 
-                        except Exception as e:
-                            console.print(f"[bold red]Failed to list DNS records: {str(e)}")
-                    else:
-                        console.print(f"[bold red]Failed to extract zone ID for {config.domain}")
-                else:
-                    console.print(f"[bold red]Domain {config.domain} not found in your Cloudflare account")
-                    
-                    # List all available zones
-                    try:
-                        all_zones = cf.zones.list()
-                        console.print("\n[blue]Available domains in your account:")
-                        if all_zones and hasattr(all_zones, 'result') and all_zones.result:
-                            for zone in all_zones.result:
-                                zone_name = getattr(zone, 'name', zone['name'] if isinstance(zone, dict) else 'unknown')
-                                zone_id = getattr(zone, 'id', zone['id'] if isinstance(zone, dict) else 'unknown')
-                                console.print(f"  - {zone_name} (ID: {zone_id})")
+                                # Test creating a DNS record (dry run)
+                                console.print("\n[bold blue]Testing DNS record creation formats...")
+                                
+                                # Test different record formats
+                                test_formats = [
+                                    {"name": f"test-{int(time.time())}", "description": "Random subdomain"},
+                                    {"name": "@", "description": "Root domain"},
+                                    {"name": config.domain, "description": "Full domain"},
+                                    {"name": f"test.{config.domain}", "description": "Fully qualified domain"},
+                                ]
+                                
+                                for test in test_formats:
+                                    console.print(f"[blue]Testing format: {test['description']} ({test['name']})")
+                                    # Just simulate the data we would send, don't actually create it
+                                    try:
+                                        # Create a DNS handler
+                                        CloudflareDNS(config)
+                                        
+                                        # Create the DNS record data (for validation only)
+                                        api_format_name = None
+                                        display_name = None
+                                        
+                                        if test['name'] == "@":
+                                            # Root domain - use @ for Cloudflare API
+                                            api_format_name = "@"
+                                            display_name = config.domain
+                                            console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
+                                            console.print(f"[blue]→ Would create record for: '{display_name}'")
+                                        elif test['name'] == config.domain:
+                                            # Full domain = root domain in Cloudflare API
+                                            api_format_name = "@"
+                                            display_name = config.domain
+                                            console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
+                                            console.print(f"[blue]→ Would create record for: '{display_name}'")
+                                        elif test['name'].endswith(f".{config.domain}"):
+                                            # Extract just the subdomain part
+                                            subdomain = test['name'].replace(f".{config.domain}", "")
+                                            api_format_name = subdomain
+                                            display_name = test['name']
+                                            console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
+                                            console.print(f"[blue]→ Would create record for: '{display_name}'")
+                                        else:
+                                            # Regular subdomain
+                                            api_format_name = test['name']
+                                            display_name = f"{test['name']}.{config.domain}"
+                                            console.print(f"[blue]→ Would send to API with 'name': '{api_format_name}'")
+                                            console.print(f"[blue]→ Would create record for: '{display_name}'")
+                                        
+                                        # Show what the API call would look like
+                                        console.print("[blue]Example API call:")
+                                        console.print("[blue]cf.dns.records.create(")
+                                        console.print("[blue]    zone_id='{zone_id}',")
+                                        console.print("[blue]    type='A',")
+                                        console.print("[blue]    name='{api_format_name}',")
+                                        console.print("[blue]    content='1.2.3.4'")
+                                        console.print("[blue])")
+                                        
+                                        console.print("[green]✓ Format validation successful")
+                                    except Exception as e:
+                                        console.print(f"[bold red]× Format validation failed: {str(e)}")
+                            except Exception as e:
+                                console.print(f"[bold red]Failed to list DNS records: {str(e)}")
                         else:
-                            console.print("  None found")
-                    except Exception as e:
-                        console.print(f"[bold red]Failed to list available domains: {str(e)}")
+                            console.print(f"[bold red]Failed to extract zone ID for {config.domain}")
+                    else:
+                        console.print(f"[bold red]Domain {config.domain} not found in your Cloudflare account")
+                        
+                        # List all available zones
+                        try:
+                            all_zones = cf_zone.zones.list()
+                            console.print("\n[blue]Available domains in your account:")
+                            if all_zones and hasattr(all_zones, 'result') and all_zones.result:
+                                for zone in all_zones.result:
+                                    zone_name = getattr(zone, 'name', zone['name'] if isinstance(zone, dict) else 'unknown')
+                                    zone_id = getattr(zone, 'id', zone['id'] if isinstance(zone, dict) else 'unknown')
+                                    console.print(f"  - {zone_name} (ID: {zone_id})")
+                            else:
+                                console.print("  None found")
+                        except Exception as e:
+                            console.print(f"[bold red]Failed to list available domains: {str(e)}")
+                except Exception as e:
+                    console.print(f"[bold red]Failed to find zone: {str(e)}")
             else:
                 # Just list all zones
-                zones = cf.zones.list()
-                zone_count = 0
-                
-                if hasattr(zones, 'result'):
-                    zone_count = len(zones.result)
-                elif isinstance(zones, list):
-                    zone_count = len(zones)
+                try:
+                    zones = cf_zone.zones.list()
+                    zone_count = 0
                     
-                console.print(f"[bold green]✓ Successfully retrieved {zone_count} zones")
-                
-                if zone_count > 0:
-                    console.print("Available domains:")
-                    for zone in (zones.result if hasattr(zones, 'result') else zones):
-                        zone_name = getattr(zone, 'name', zone['name'] if isinstance(zone, dict) else 'unknown')
-                        zone_id = getattr(zone, 'id', zone['id'] if isinstance(zone, dict) else 'unknown')
-                        console.print(f"  - {zone_name} (ID: {zone_id})")
-                else:
-                    console.print("[bold yellow]No zones found in your Cloudflare account")
+                    if hasattr(zones, 'result'):
+                        zone_count = len(zones.result)
+                    elif isinstance(zones, list):
+                        zone_count = len(zones)
+                        
+                    console.print(f"[bold green]✓ Successfully retrieved {zone_count} zones")
+                    
+                    if zone_count > 0:
+                        console.print("Available domains:")
+                        for zone in (zones.result if hasattr(zones, 'result') else zones):
+                            zone_name = getattr(zone, 'name', zone['name'] if isinstance(zone, dict) else 'unknown')
+                            zone_id = getattr(zone, 'id', zone['id'] if isinstance(zone, dict) else 'unknown')
+                            console.print(f"  - {zone_name} (ID: {zone_id})")
+                    else:
+                        console.print("[bold yellow]No zones found in your Cloudflare account")
+                except Exception as e:
+                    console.print(f"[bold red]Failed to list zones: {str(e)}")
             
             console.print("\n[bold green]✓ Cloudflare authentication successful!")
             
             # Check for public IP detection
             console.print("\n[bold blue]Testing public IP detection...")
             try:
-                ip = get_public_ip()
+                ip = utils.get_public_ip()
                 console.print(f"[bold green]✓ Successfully detected public IP: {ip}")
             except Exception as e:
                 console.print(f"[bold red]Failed to detect public IP: {str(e)}")

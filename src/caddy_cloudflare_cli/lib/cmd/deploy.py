@@ -10,7 +10,8 @@ from rich.console import Console
 from rich.prompt import Prompt, Confirm, IntPrompt
 
 from ..config import Config, ConfigError
-from ..utils import get_public_ip
+# Import utils directly as a module, not just the function
+import caddy_cloudflare_cli.lib.utils as utils
 from ..dns.cloudflare_api_handler import CloudflareDNS
 from ..proxy.caddy import CaddyProxy
 from ..proxy.base import ProxyConfig
@@ -272,7 +273,7 @@ def deploy_command(
                 else:
                     console.print("[blue]Auto-detecting public IP address...")
                     try:
-                        detected_ip = get_public_ip()
+                        detected_ip = utils.get_public_ip()
                         console.print(f"[blue]Detected public IP: {detected_ip}")
                         dns_record = dns.create_record(subdomain, content=detected_ip, force_update=force_update)
                     except Exception as ip_error:

@@ -64,10 +64,12 @@ def start_command(config_file=None):
             raise typer.Exit(code=1)
         
         # Check if Caddy is running first
-        is_running = proxy.status()
+        status = proxy.status()
         
-        if is_running:
+        if status.running:
             console.print("[bold yellow]! Caddy is already running")
+            console.print(f"PID: {status.pid}")
+            console.print(f"Config: {status.config_file}")
             return
         
         # Generate configuration if needed
@@ -85,20 +87,21 @@ def start_command(config_file=None):
         
         result = proxy.start(config_file)
         
-        if result:
-            pid = proxy._get_pid()
+        if result.running:
             console.print("[bold green]✓ Caddy is running")
-            console.print(f"PID: {pid}")
-            console.print(f"Config: {proxy.caddyfile_path}")
+            console.print(f"PID: {result.pid}")
+            console.print(f"Config: {result.config_file}")
             
             # Verify binding to port 443
-            if proxy._verify_process_binding(pid, 443):
+            if proxy._verify_process_binding(result.pid, 443):
                 console.print("[bold green]✓ Successfully bound to port 443")
             else:
                 console.print("[bold yellow]! Warning: Caddy is running but may not be properly bound to port 443")
                 console.print("  This could indicate permission issues or a port conflict")
         else:
             console.print("[bold red]! Failed to start Caddy")
+            if result.error:
+                console.print(f"Error: {result.error}")
             console.print("\nTroubleshooting tips:")
             console.print("1. Check if another process is using port 443")
             console.print("   lsof -i :443 -P -n")

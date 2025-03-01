@@ -18,6 +18,8 @@ anyio==4.8.0
 attrs==25.1.0
     # via cattrs
     # via lsprotocol
+backports-tarfile==1.2.0
+    # via jaraco-context
 cattrs==24.1.2
     # via lsprotocol
     # via pygls
@@ -25,6 +27,8 @@ certifi==2025.1.31
     # via httpcore
     # via httpx
     # via requests
+cffi==1.17.1
+    # via cryptography
 charset-normalizer==3.4.1
     # via requests
 click==8.1.8
@@ -33,20 +37,39 @@ cloudflare==4.0.0
     # via caddy-cloudflare-cli
 coverage==7.6.12
     # via pytest-cov
+cryptography==44.0.1
+    # via secretstorage
 distro==1.9.0
     # via cloudflare
+docutils==0.21.2
+    # via readme-renderer
 h11==0.14.0
     # via httpcore
 httpcore==1.0.7
     # via httpx
 httpx==0.28.1
     # via cloudflare
+id==1.5.0
+    # via twine
 idna==3.10
     # via anyio
     # via httpx
     # via requests
+importlib-metadata==8.6.1
+    # via keyring
 iniconfig==2.0.0
     # via pytest
+jaraco-classes==3.4.0
+    # via keyring
+jaraco-context==6.0.1
+    # via keyring
+jaraco-functools==4.1.0
+    # via keyring
+jeepney==0.9.0
+    # via keyring
+    # via secretstorage
+keyring==25.6.0
+    # via twine
 lsprotocol==2023.0.1
     # via pygls
     # via ruff-lsp
@@ -54,11 +77,19 @@ markdown-it-py==3.0.0
     # via rich
 mdurl==0.1.2
     # via markdown-it-py
+more-itertools==10.6.0
+    # via jaraco-classes
+    # via jaraco-functools
+nh3==0.2.21
+    # via readme-renderer
 packaging==24.2
     # via pytest
     # via ruff-lsp
+    # via twine
 pluggy==1.5.0
     # via pytest
+pycparser==2.22
+    # via cffi
 pydantic==2.10.6
     # via cloudflare
 pydantic-core==2.27.2
@@ -66,6 +97,7 @@ pydantic-core==2.27.2
 pygls==1.3.1
     # via ruff-lsp
 pygments==2.19.1
+    # via readme-renderer
     # via rich
 pytest==8.3.4
     # via pytest-cov
@@ -77,20 +109,33 @@ python-dotenv==1.0.1
 pyyaml==6.0.2
     # via caddy-cloudflare-cli
     # via responses
+readme-renderer==44.0
+    # via twine
 requests==2.32.3
     # via caddy-cloudflare-cli
+    # via id
+    # via requests-toolbelt
     # via responses
+    # via twine
+requests-toolbelt==1.0.0
+    # via twine
 responses==0.25.6
+rfc3986==2.0.0
+    # via twine
 rich==13.9.4
+    # via twine
     # via typer
 ruff==0.9.9
     # via ruff-lsp
 ruff-lsp==0.0.62
+secretstorage==3.3.3
+    # via keyring
 shellingham==1.5.4
     # via typer
 sniffio==1.3.1
     # via anyio
     # via cloudflare
+twine==6.1.0
 typer==0.15.2
     # via caddy-cloudflare-cli
 typing-extensions==4.12.2
@@ -103,3 +148,6 @@ typing-extensions==4.12.2
 urllib3==2.3.0
     # via requests
     # via responses
+    # via twine
+zipp==3.21.0
+    # via importlib-metadata

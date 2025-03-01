@@ -7,22 +7,38 @@ from typing import Dict, Optional
 from cloudflare import Cloudflare, APIError
 
 from ..config import Config
-from ..utils import generate_random_subdomain
+from ..cmd.domain import generate_random_subdomain
 
 class CloudflareManager:
     def __init__(self, config: Config):
         self.config = config
         
         # Initialize Cloudflare client with appropriate auth
-        if config.cloudflare_token:
+        # Check if credentials are actually valid/not empty
+        has_valid_token = bool(config.cloudflare_token and config.cloudflare_token.strip())
+        has_valid_dual_tokens = bool(config.cloudflare_zone_token and config.cloudflare_dns_token and
+                                  config.cloudflare_zone_token.strip() and config.cloudflare_dns_token.strip())
+        has_valid_api_key = bool(config.cloudflare_api_key and config.cloudflare_api_email and 
+                                config.cloudflare_api_key.strip() and config.cloudflare_api_email.strip())
+        
+        # For operations, we'll use DNS token if available, otherwise global API token
+        if has_valid_dual_tokens:
+            # Use Zone and DNS Tokens for least privilege
+            # For general zone operations use the zone token
+            self.cf_zone = Cloudflare(api_token=config.cloudflare_zone_token)
+            # For DNS operations use the DNS token
+            self.cf = Cloudflare(api_token=config.cloudflare_dns_token)
+        elif has_valid_token:
             # Use API Token authentication (preferred method)
             self.cf = Cloudflare(api_token=config.cloudflare_token)
-        elif config.cloudflare_api_key and config.cloudflare_api_email:
+            self.cf_zone = self.cf  # Same client for both operations
+        elif has_valid_api_key:
             # Use Global API Key authentication (legacy method)
             self.cf = Cloudflare(
                 api_key=config.cloudflare_api_key,
                 api_email=config.cloudflare_api_email
             )
+            self.cf_zone = self.cf  # Same client for both operations
         else:
             raise Exception("No valid Cloudflare credentials provided")
             
@@ -33,10 +49,20 @@ class CloudflareManager:
         """Get zone ID for the configured domain"""
         if self._zone_id is None:
             try:
-                zones = self.cf.zones.list(name=self.config.domain)
+                zones = self.cf_zone.zones.list(name=self.config.domain)
                 if not zones or not zones.result:
                     raise Exception(f"Domain {self.config.domain} not found in your Cloudflare account")
-                self._zone_id = zones.result[0]['id']
+                
+                # Handle Zone objects or dictionaries
+                zone = zones.result[0]
+                if hasattr(zone, 'id'):
+                    # If it's a Zone object with an id attribute
+                    self._zone_id = zone.id
+                elif isinstance(zone, dict) and 'id' in zone:
+                    # If it's a dictionary with an 'id' key
+                    self._zone_id = zone['id']
+                else:
+                    raise Exception(f"Unable to extract zone ID from response")
             except APIError as e:
                 raise Exception(f"Cloudflare API error: {str(e)}")
         return self._zone_id

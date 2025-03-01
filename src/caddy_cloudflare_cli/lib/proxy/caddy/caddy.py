@@ -12,11 +12,11 @@ from typing import Dict, Optional, Union, List
 
 from ...config import Config
 from .caddyfile import CaddyfileParser
-from ..base import ProxyConfig
+from ..base import ProxyConfig, ProxyStatus, ReverseProxy, ProxyError
 
 logger = logging.getLogger(__name__)
 
-class CaddyProxy:
+class CaddyProxy(ReverseProxy):
     """Manages Caddy proxy server"""
     
     def __init__(self, config: Config):
@@ -549,20 +549,29 @@ class CaddyProxy:
             # If we can't check, assume it's not binding
             return False
     
-    def start(self, config_file: Optional[Union[Path, str]] = None) -> bool:
+    def start(self, config_file: Optional[Union[Path, str]] = None) -> ProxyStatus:
         """
-        Start Caddy server
+        Start the proxy server
         
         Args:
-            config_file: Path to config file
+            config_file: Path to configuration file
             
         Returns:
-            True if started successfully
+            ProxyStatus object
+            
+        Raises:
+            ProxyError: If server fails to start
         """
         # Check if already running
-        if self.status():
+        if self.is_running():
             logger.info("Caddy is already running")
-            return True
+            pid = self._get_pid()
+            return ProxyStatus(
+                running=True,
+                pid=pid,
+                config_file=self.caddyfile_path,
+                error=None
+            )
         
         # Stop any existing Caddy processes that might be running but not properly detected
         caddy_pids = self._find_caddy_processes()
@@ -580,7 +589,12 @@ class CaddyProxy:
         if self._is_port_in_use(443):
             logger.error("Port 443 is already in use. Cannot start Caddy.")
             logger.error("Use 'lsof -i :443 -P -n' to see which process is using port 443")
-            return False
+            return ProxyStatus(
+                running=False,
+                pid=None,
+                config_file=None,
+                error="Port 443 is already in use"
+            )
         
         # Check if Caddy is installed by systemd and running
         try:
@@ -593,7 +607,12 @@ class CaddyProxy:
             if systemctl_result.stdout.strip() == "active":
                 logger.error("Caddy is already running as a systemd service.")
                 logger.error("Please stop the systemd service first: sudo systemctl stop caddy")
-                return False
+                return ProxyStatus(
+                    running=False,
+                    pid=None,
+                    config_file=None,
+                    error="Caddy is already running as a systemd service"
+                )
         except Exception:
             # Ignore errors if systemctl is not available
             pass
@@ -608,7 +627,12 @@ class CaddyProxy:
         # Validate configuration
         if not self.validate_config(file_to_use):
             logger.error("Cannot start server with invalid configuration")
-            return False
+            return ProxyStatus(
+                running=False,
+                pid=None,
+                config_file=None,
+                error="Cannot start server with invalid configuration"
+            )
         
         # Set up environment variables for Cloudflare authentication
         env = os.environ.copy()
@@ -645,7 +669,12 @@ class CaddyProxy:
                         logger.error(f"Port 443 is being used by:\n{lsof_result.stdout}")
                 except Exception:
                     pass
-                return False
+                return ProxyStatus(
+                    running=False,
+                    pid=None,
+                    config_file=None,
+                    error="Port 443 is already in use"
+                )
                 
             # Build the start command - this is the most reliable way to start Caddy in background
             # We're using nohup and shell=True to ensure the process stays alive
@@ -663,13 +692,23 @@ class CaddyProxy:
             
             if process.returncode != 0:
                 logger.error(f"Failed to start Caddy: {process.stderr}")
-                return False
+                return ProxyStatus(
+                    running=False,
+                    pid=None,
+                    config_file=None,
+                    error=f"Failed to start Caddy: {process.stderr}"
+                )
                 
             # Get the PID from the output
             pid = process.stdout.strip()
             if not pid:
                 logger.error("Failed to get PID after starting Caddy")
-                return False
+                return ProxyStatus(
+                    running=False,
+                    pid=None,
+                    config_file=None,
+                    error="Failed to get PID after starting Caddy"
+                )
                 
             pid = int(pid)
             logger.info(f"Started Caddy process with PID {pid}")
@@ -686,12 +725,22 @@ class CaddyProxy:
                     logger.error(f"Caddy process stopped unexpectedly (PID {pid})")
                     # Try to get last lines of log
                     self._show_log_tail(log_file)
-                    return False
+                    return ProxyStatus(
+                        running=False,
+                        pid=None,
+                        config_file=None,
+                        error="Caddy process stopped unexpectedly"
+                    )
                 
                 # Check if port 443 is in use by our process
                 if self._verify_process_binding(pid, 443):
                     logger.info(f"Caddy server (PID {pid}) started successfully and bound to port 443")
-                    return True
+                    return ProxyStatus(
+                        running=True,
+                        pid=pid,
+                        config_file=self.caddyfile_path if isinstance(config_file, Path) else Path(config_file),
+                        error=None
+                    )
                 
                 # Check if another Caddy process has started and is binding to port 443
                 other_caddy_pids = [p for p in self._find_caddy_processes() if p != pid]
@@ -702,7 +751,12 @@ class CaddyProxy:
                         self._save_pid(other_pid)
                         # Terminate the original process
                         self._kill_process(pid, force=True)
-                        return True
+                        return ProxyStatus(
+                            running=True,
+                            pid=other_pid,
+                            config_file=self.caddyfile_path if isinstance(config_file, Path) else Path(config_file),
+                            error=None
+                        )
                 
                 logger.debug(f"Waiting for Caddy to bind to port 443 (attempt {attempt}/{max_attempts})...")
             
@@ -734,18 +788,33 @@ class CaddyProxy:
             # as sometimes Caddy works even when port binding checks fail
             if self._is_process_running(pid):
                 logger.warning("Caddy is running but port binding verification failed. Continuing anyway.")
-                return True
+                return ProxyStatus(
+                    running=True,
+                    pid=pid,
+                    config_file=self.caddyfile_path if isinstance(config_file, Path) else Path(config_file),
+                    error=None
+                )
                 
             # Kill the process since it's not working properly
             logger.warning(f"Terminating non-functional Caddy process (PID {pid})")
             self._kill_process(pid, force=True)
-            return False
+            return ProxyStatus(
+                running=False,
+                pid=None,
+                config_file=None,
+                error="Caddy process is not working properly"
+            )
             
         except Exception as e:
             logger.error(f"Error starting Caddy server: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            return False
+            return ProxyStatus(
+                running=False,
+                pid=None,
+                config_file=None,
+                error=f"Error starting Caddy server: {e}"
+            )
             
     def _show_log_tail(self, log_file: Path, lines: int = 20):
         """Show the last lines of a log file"""
@@ -787,7 +856,7 @@ class CaddyProxy:
             True if stopped successfully or not running
         """
         # Check if Caddy is running
-        if not self.status():
+        if not self.is_running():
             logger.info("Caddy is not running")
             return True
             
@@ -840,12 +909,12 @@ class CaddyProxy:
         
         return success
     
-    def status(self) -> bool:
+    def status(self) -> ProxyStatus:
         """
         Check if Caddy is running
         
         Returns:
-            True if Caddy is running
+            ProxyStatus object with running status and process info
         """
         # Try to get the PID from the PID file
         pid = self._get_pid()
@@ -867,7 +936,12 @@ class CaddyProxy:
                     # Check if the process is our Caddy binary and has 'run' command
                     if caddy_path_str in process_cmd and "run" in process_cmd:
                         logger.debug(f"Process {pid} is a Caddy process: {process_cmd}")
-                        return True
+                        return ProxyStatus(
+                            running=True, 
+                            pid=pid, 
+                            config_file=self.caddyfile_path,
+                            error=None
+                        )
                     else:
                         logger.warning(f"PID {pid} exists but is not a Caddy process: {process_cmd}")
             except Exception as e:
@@ -880,9 +954,19 @@ class CaddyProxy:
         if caddy_pids:
             # Update the PID file with the first found Caddy process
             self._save_pid(caddy_pids[0])
-            return True
-            
-        return False
+            return ProxyStatus(
+                running=True, 
+                pid=caddy_pids[0], 
+                config_file=self.caddyfile_path,
+                error=None
+            )
+        
+        return ProxyStatus(
+            running=False, 
+            pid=None, 
+            config_file=None,
+            error="No running Caddy process found"
+        )
     
     def reload(self) -> bool:
         """
@@ -897,7 +981,7 @@ class CaddyProxy:
             return False
         
         # Check if Caddy is running
-        if not self.status():
+        if not self.is_running():
             logger.warning("Caddy is not running, starting instead of reloading")
             return self.start()
         
@@ -920,3 +1004,150 @@ class CaddyProxy:
         
         logger.error("No running Caddy process found for reload")
         return False
+
+    def install(self, system_wide: bool = False) -> bool:
+        """
+        Install Caddy binary
+        
+        Args:
+            system_wide: Whether to install system-wide (requires sudo)
+            
+        Returns:
+            True if successful
+            
+        Raises:
+            ProxyError: If installation fails
+        """
+        try:
+            # Create bin directory if it doesn't exist
+            bin_dir = self.dirs['bin']
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Determine target path
+            target_path = Path("/usr/local/bin/caddy") if system_wide else self.caddy_path
+            
+            # Check if Caddy is already installed
+            caddy_exists = target_path.exists()
+            if caddy_exists:
+                logger.info(f"Caddy is already installed at {target_path}")
+                return True
+                
+            # Determine platform and architecture
+            import platform
+            system = platform.system().lower()
+            machine = platform.machine().lower()
+            
+            arch_map = {
+                'x86_64': 'amd64',
+                'amd64': 'amd64',
+                'aarch64': 'arm64',
+                'arm64': 'arm64',
+                'armv7l': 'arm',
+                'armv6l': 'arm'
+            }
+            
+            os_map = {
+                'darwin': 'mac',
+                'linux': 'linux',
+                'windows': 'windows'
+            }
+            
+            os_name = os_map.get(system, system)
+            arch = arch_map.get(machine, machine)
+            
+            # Determine file extension
+            ext = '.exe' if os_name == 'windows' else ''
+            
+            # Download URL
+            version = "2.7.6"  # Use a specific version for stability
+            download_url = f"https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_{os_name}_{arch}{ext}"
+            
+            logger.info(f"Downloading Caddy from {download_url}")
+            
+            # Use requests to download the file
+            import requests
+            from rich.progress import Progress, TransferSpeedColumn, DownloadColumn
+            
+            headers = {'User-Agent': 'caddy-cloudflare-cli/1.0'}
+            
+            with requests.get(download_url, stream=True, headers=headers, timeout=30) as response:
+                response.raise_for_status()
+                total_size = int(response.headers.get('content-length', 0))
+                
+                # Create temporary file path
+                temp_path = bin_dir / f"caddy_temp{ext}"
+                
+                # Download with progress bar
+                with open(temp_path, 'wb') as f:
+                    with Progress(
+                        TransferSpeedColumn(),
+                        DownloadColumn(),
+                        "[progress.percentage]{task.percentage:>3.0f}%",
+                    ) as progress:
+                        task = progress.add_task("Downloading Caddy", total=total_size)
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                            progress.update(task, advance=len(chunk))
+                
+                # Make the file executable
+                if os_name != 'windows':
+                    temp_path.chmod(0o755)
+                
+                # Move to final location
+                if system_wide:
+                    logger.info("Installing Caddy system-wide (requires sudo)")
+                    result = subprocess.run(
+                        ["sudo", "mv", str(temp_path), str(target_path)],
+                        check=False
+                    )
+                    if result.returncode != 0:
+                        logger.error(f"Failed to install Caddy system-wide: {result.stderr}")
+                        return False
+                else:
+                    # For user install, just rename the file
+                    temp_path.rename(target_path)
+                    
+                logger.info(f"Caddy installed successfully at {target_path}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to install Caddy: {e}")
+            return False
+    
+    def uninstall(self) -> bool:
+        """
+        Uninstall Caddy binary
+        
+        Returns:
+            True if successful
+            
+        Raises:
+            ProxyError: If uninstallation fails
+        """
+        try:
+            # Stop Caddy if it's running
+            if self.is_running():
+                logger.info("Stopping Caddy before uninstalling")
+                self.stop()
+                
+            # Remove Caddy binary
+            if self.caddy_path.exists():
+                logger.info(f"Removing Caddy binary at {self.caddy_path}")
+                self.caddy_path.unlink()
+                
+            # Check if it was successfully removed
+            if self.caddy_path.exists():
+                logger.error(f"Failed to remove Caddy binary at {self.caddy_path}")
+                return False
+                
+            logger.info("Caddy uninstalled successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to uninstall Caddy: {e}")
+            return False
+
+    # Method used by other functions to check if Caddy is running
+    def is_running(self) -> bool:
+        """Helper method to check if Caddy is running"""
+        return self.status().running

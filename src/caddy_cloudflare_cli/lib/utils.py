@@ -4,17 +4,26 @@ Utility functions for Caddy Cloudflare CLI
 import os
 import platform
 import logging
+import socket
 from pathlib import Path
 from typing import Optional, Tuple
 from functools import lru_cache
 
-# Import utility functions from cmd modules
-from .cmd.port import is_port_in_use
-
 logger = logging.getLogger(__name__)
 
+# Socket utility functions
+def is_port_in_use(port: int, host: str = 'localhost') -> bool:
+    """Check if a port is already in use on the system"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return False
+        except socket.error:
+            return True
+
 # Alias for backward compatibility
-is_port_available = lambda port, host='localhost': not is_port_in_use(port)
+def is_port_available(port, host='localhost'):
+    return not is_port_in_use(port)
 
 def find_available_port(start_port: int = 8000, end_port: int = 9000) -> Optional[int]:
     """
@@ -27,8 +36,9 @@ def find_available_port(start_port: int = 8000, end_port: int = 9000) -> Optiona
     Returns:
         Available port or None if none found
     """
-    from .cmd.port import suggest_available_port
-    port = suggest_available_port(start_port)
+    port = start_port
+    while is_port_in_use(port) and port < end_port:
+        port += 1
     return port if port <= end_port else None
 
 @lru_cache(maxsize=1)

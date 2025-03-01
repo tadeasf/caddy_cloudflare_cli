@@ -10,6 +10,7 @@ from cloudflare import Cloudflare
 
 from ..config import Config
 from .base import DNSProvider, DNSError, DNSRecord
+import caddy_cloudflare_cli.lib.utils as utils
 
 logger = logging.getLogger("caddy_cloudflare_cli.lib.dns.cloudflare_api_handler")
 
@@ -25,18 +26,31 @@ class CloudflareDNS(DNSProvider):
             # Debug auth info
             logger.debug("Cloudflare authentication config:")
             logger.debug(f"  Token: {'Provided' if config.cloudflare_token else 'Not provided'}")
+            logger.debug(f"  Zone Token: {'Provided' if config.cloudflare_zone_token else 'Not provided'}")
+            logger.debug(f"  DNS Token: {'Provided' if config.cloudflare_dns_token else 'Not provided'}")
             logger.debug(f"  API Key: {'Provided' if config.cloudflare_api_key else 'Not provided'}")
             logger.debug(f"  Email: {'Provided' if config.cloudflare_api_email else 'Not provided'}")
             
-            # Check if token is actually valid/not empty
+            # Check if credentials are actually valid/not empty
             has_valid_token = bool(config.cloudflare_token and config.cloudflare_token.strip())
+            has_valid_dual_tokens = bool(config.cloudflare_zone_token and config.cloudflare_dns_token and
+                                      config.cloudflare_zone_token.strip() and config.cloudflare_dns_token.strip())
             has_valid_api_key = bool(config.cloudflare_api_key and config.cloudflare_api_email and 
                                     config.cloudflare_api_key.strip() and config.cloudflare_api_email.strip())
             
-            if has_valid_token:
+            # For operations, we'll use DNS token if available, otherwise global API token
+            if has_valid_dual_tokens:
+                # Use Zone and DNS Tokens for least privilege
+                logger.info("Using Zone and DNS Token authentication (least privilege)")
+                # For general zone operations use the zone token
+                self.cf_zone = Cloudflare(api_token=config.cloudflare_zone_token)
+                # For DNS operations use the DNS token
+                self.cf = Cloudflare(api_token=config.cloudflare_dns_token)
+            elif has_valid_token:
                 # Use API Token authentication (preferred method)
                 logger.info("Using API Token authentication")
                 self.cf = Cloudflare(api_token=config.cloudflare_token)
+                self.cf_zone = self.cf  # Same client for both operations
             elif has_valid_api_key:
                 # Use Global API Key authentication (legacy method)
                 logger.info("Using Global API Key authentication")
@@ -45,6 +59,7 @@ class CloudflareDNS(DNSProvider):
                     api_key=config.cloudflare_api_key,
                     api_email=config.cloudflare_api_email
                 )
+                self.cf_zone = self.cf  # Same client for both operations
             else:
                 raise DNSError("No valid Cloudflare credentials provided. Please set CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL in your .env file or configure via 'caddy-cloudflare init'")
         except Exception as e:
@@ -57,25 +72,26 @@ class CloudflareDNS(DNSProvider):
         """Get zone ID for domain"""
         if not self._zone_id:
             try:
-                # Use list method with name filter instead of get method
-                zones = self.cf.zones.list(name=self.config.domain)
-                # Check if we have any results
-                if not zones or not hasattr(zones, 'result') or not zones.result:
+                # Use the zone client for zone operations
+                zones = self.cf_zone.zones.list(name=self.config.domain)
+                if not zones or not zones.result:
                     raise DNSError(f"Domain {self.config.domain} not found in your Cloudflare account")
                 
-                # Handle the Zone object correctly - it's now an object, not a dictionary
+                # Handle Zone objects or dictionaries (for compatibility with different API versions)
                 zone = zones.result[0]
-                # The id is now an attribute of Zone object
                 if hasattr(zone, 'id'):
+                    # If it's a Zone object with an id attribute
                     self._zone_id = zone.id
+                elif isinstance(zone, dict) and 'id' in zone:
+                    # If it's a dictionary with an 'id' key
+                    self._zone_id = zone['id']
                 else:
-                    # Fallback attempt for backward compatibility
-                    self._zone_id = zone['id'] if isinstance(zone, dict) else None
-                    
-                if not self._zone_id:
-                    raise DNSError(f"Could not extract zone ID for domain {self.config.domain}")
+                    # Log zone information for debugging
+                    logger.error(f"Unable to extract zone ID. Zone type: {type(zone)}, Zone: {zone}")
+                    raise DNSError(f"Unable to extract zone ID from response")
             except Exception as e:
-                raise DNSError(f"Cloudflare API error: {str(e)}")
+                logger.error(f"Failed to get zone ID: {str(e)}", exc_info=True)
+                raise DNSError(f"Failed to get zone ID for {self.config.domain}: {str(e)}")
         return self._zone_id
 
     def create_record(
@@ -108,8 +124,7 @@ class CloudflareDNS(DNSProvider):
                     content = self.config.public_ip
                     logger.info(f"Using configured public IP: {content}")
                 else:
-                    from caddy_cloudflare_cli.lib.utils import get_public_ip
-                    content = get_public_ip()
+                    content = utils.get_public_ip()
                     logger.info(f"Auto-detected public IP: {content}")
 
             # Get the zone ID for the domain
@@ -167,7 +182,8 @@ class CloudflareDNS(DNSProvider):
                     proxied=proxied,
                     ttl=ttl
                 )
-                return self._record_to_dns_record(response.result if hasattr(response, 'result') else response)
+                result = response.result if hasattr(response, 'result') else response
+                return self._record_to_dns_record(result)
             except cloudflare.BadRequestError as e:
                 error_msg = str(e)
                 logger.error(f"Cloudflare API error: {error_msg}")
