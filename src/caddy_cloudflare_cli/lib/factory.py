@@ -1,12 +1,11 @@
 """
 Factory classes for provider instantiation
 """
-from typing import Type, Dict, Optional
+from typing import Type, Dict, Optional, Any
 
 from .config import Config
 from .dns.base import DNSProvider
 from .dns.cloudflare_api_handler import CloudflareDNS
-from .proxy.base import ReverseProxy
 from .proxy.caddy import CaddyProxy
 
 class ProviderFactory:
@@ -61,23 +60,23 @@ class DNSProviderFactory(ProviderFactory):
         cls._providers[name] = provider_class
 
 class ProxyProviderFactory(ProviderFactory):
-    """Factory for reverse proxy providers"""
+    """Factory for proxy providers"""
     
     _providers = {
         'caddy': CaddyProxy
     }
     
     @classmethod
-    def create(cls, provider_type: Optional[str] = None, config: Config = None) -> ReverseProxy:
+    def create(cls, provider_type: Optional[str] = None, config: Config = None) -> Any:
         """
-        Create reverse proxy provider instance
+        Create proxy provider instance
         
         Args:
             provider_type: Provider type (if None, uses config.proxy_type)
             config: Configuration object
             
         Returns:
-            ReverseProxy instance
+            Proxy provider instance (e.g. CaddyProxy)
             
         Raises:
             ValueError: If provider type is not supported
@@ -87,11 +86,11 @@ class ProxyProviderFactory(ProviderFactory):
         return super().create(provider_type, config)
     
     @classmethod
-    def get_providers(cls) -> Dict[str, Type[ReverseProxy]]:
-        """Get available reverse proxy providers"""
+    def get_providers(cls) -> Dict[str, Type]:
+        """Get available proxy providers"""
         return cls._providers
     
     @classmethod
-    def register_provider(cls, name: str, provider_class: Type[ReverseProxy]):
-        """Register new reverse proxy provider"""
+    def register_provider(cls, name: str, provider_class: Type):
+        """Register new proxy provider"""
         cls._providers[name] = provider_class 

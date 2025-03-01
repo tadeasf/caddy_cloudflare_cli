@@ -2,7 +2,6 @@
 Deploy command implementation for Caddy Cloudflare CLI
 """
 import logging
-import time
 from typing import Optional
 from pathlib import Path
 
@@ -30,6 +29,7 @@ def deploy_command(
     log_level: str = "INFO",
     public_ip: Optional[str] = None,
     force_update: bool = False,
+    force_port: bool = False,
     debug: bool = False,
 ) -> None:
     """
@@ -175,7 +175,7 @@ def deploy_command(
                 
                 if choice <= len(DEFAULT_PORTS):
                     selected_port = DEFAULT_PORTS[choice - 1]
-                    if is_port_in_use(selected_port):
+                    if is_port_in_use(selected_port) and not force_port:
                         console.print(f"[yellow]Warning: Port {selected_port} is already in use")
                         if Confirm.ask("Do you still want to use this port?", default=False):
                             port = selected_port
@@ -194,7 +194,7 @@ def deploy_command(
                     if not validate_port(custom_port):
                         console.print("[yellow]Invalid port number, using suggested available port")
                         port = available_port
-                    elif is_port_in_use(custom_port):
+                    elif is_port_in_use(custom_port) and not force_port:
                         console.print(f"[yellow]Warning: Port {custom_port} is already in use")
                         if Confirm.ask("Do you still want to use this port?", default=False):
                             port = custom_port
@@ -208,7 +208,7 @@ def deploy_command(
                 console.print(f"Using port {port} (automatically selected)")
         elif interactive:
             # If port is provided but interactive mode is on, confirm the port choice
-            if is_port_in_use(port):
+            if is_port_in_use(port) and not force_port:
                 console.print(f"[yellow]Warning: The specified port {port} is already in use")
                 if not Confirm.ask("Do you still want to use this port?", default=False):
                     available_port = suggest_available_port(8080)
@@ -223,8 +223,10 @@ def deploy_command(
             console.print("Port must be between 1 and 65535")
             raise typer.Exit(code=1)
             
-        if is_port_in_use(port) and not interactive:
+        if is_port_in_use(port) and not interactive and not force_port:
             console.print(f"[yellow]Warning: Port {port} is already in use")
+            console.print("Use --force-port to force using this port anyway")
+            console.print("[yellow]Continuing with deployment, but your service might not work properly")
 
         # Initialize providers
         try:
@@ -328,10 +330,10 @@ def deploy_command(
             
             # Start proxy
             status.update("[bold blue]Starting Caddy...")
-            proxy_status = proxy.start(Path(config_file))
+            proxy_started = proxy.start(config_file)
             
-            if not proxy_status.running:
-                console.print(f"[bold red]Failed to start Caddy: {proxy_status.error}")
+            if not proxy_started:
+                console.print("[bold red]Failed to start Caddy")
                 raise typer.Exit(code=1)
 
         console.print("\n[bold green]✓ Deployment complete!")

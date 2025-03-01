@@ -100,7 +100,7 @@ def main():
     """Parse arguments and start the server"""
     parser = argparse.ArgumentParser(description="Simple health check HTTP server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080, help="Port to bind to (default: 8080)")
+    parser.add_argument("--port", type=int, default=8081, help="Port to bind to (default: 8080)")
     
     args = parser.parse_args()
     run_server(args.host, args.port)
