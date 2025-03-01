@@ -8,5 +8,6 @@ wheels/
 
 # venv
 .venv
-.env*
+.env
+.env.keys
 ./caddy
