@@ -1058,9 +1058,8 @@ class CaddyProxy(ReverseProxy):
             # Determine file extension
             ext = '.exe' if os_name == 'windows' else ''
             
-            # Download URL
-            version = "2.7.6"  # Use a specific version for stability
-            download_url = f"https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_{os_name}_{arch}{ext}"
+            # Download URL - using custom URL instead of dynamic construction
+            download_url = "https://github.com/tadeasf/caddy_cloudflare_cli/releases/download/v0.10.0/caddy-cloudflare-linux-amd6"
             
             logger.info(f"Downloading Caddy from {download_url}")
             
